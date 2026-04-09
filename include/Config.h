@@ -58,6 +58,12 @@ namespace ModbusAddr {
     // Cycle Counter
     const int JUMLAH_CYCLE = 132;
     
+    // Dynamic Threshold (Float, 2 registers each)
+    const int DYNAMIC_THRESH_1 = 134;
+    const int DYNAMIC_THRESH_2 = 136;
+    const int RATE_OF_CHANGE = 138;
+
+    
     // Graph Registers
     const int COMMAND_REG = 120;
     const int NUM_OF_DATA_CH0 = 121;

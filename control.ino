@@ -19,10 +19,22 @@ const int RETREAT_SPEED = 150;
 // Load Cell Configuration
 const int LOADCELL_DOUT_PIN = 12;
 const int LOADCELL_SCK_PIN = 13;
-int threshold1 = 20;
-int threshold2 = 40;
+int threshold1 = 20;  // Base threshold 1 (akan dijadikan dinamis)
+int threshold2 = 40;  // Base threshold 2 (akan dijadikan dinamis)
 long loadCellOffset = 0;
 float latestValidLoad = 0.0;
+
+// Dynamic Threshold Parameters (Rate of Change Based)
+float dynamicThreshold1 = 20.0;  // Dynamic threshold 1
+float dynamicThreshold2 = 40.0;  // Dynamic threshold 2
+float prevLoad = 0.0;             // Previous load value for rate calculation
+float loadChangeRate = 0.0;       // Rate of change (N/s)
+float loadChangeMagnitude = 0.0;  // Magnitude of change (N)
+const float RATE_SENSITIVITY = 2.0;  // Sensitivity multiplier for rate of change
+const float MAGNITUDE_SENSITIVITY = 0.5;  // Sensitivity multiplier for magnitude change
+const float MAX_THRESHOLD_MULTIPLIER = 3.0;  // Maximum threshold multiplier
+const float MIN_THRESHOLD_MULTIPLIER = 0.3;  // Minimum threshold multiplier
+const float RATE_SMOOTHING_ALPHA = 0.7;  // Smoothing factor for rate of change
 
 // Adaptive Load Control Parameters
 const float LOAD_SCALE_MIN = 0.15;
@@ -222,26 +234,72 @@ void setAdmittanceOffset(float offset) {
 // LOAD-BASED ADAPTIVE FUNCTIONS
 //==================================================================
 
+// Calculate rate of change and update dynamic thresholds
+void updateDynamicThresholds(float currentLoad, float dt) {
+    // Calculate rate of change (N/s)
+    float currentRate = 0.0;
+    if (dt > 0.0) {
+        currentRate = (currentLoad - prevLoad) / dt;
+    }
+    
+    // Smooth the rate of change to reduce noise
+    loadChangeRate = (RATE_SMOOTHING_ALPHA * currentRate) + ((1.0 - RATE_SMOOTHING_ALPHA) * loadChangeRate);
+    
+    // Calculate magnitude of change
+    loadChangeMagnitude = abs(currentLoad - prevLoad);
+    
+    // Calculate dynamic threshold multiplier based on rate and magnitude
+    // Higher rate of change or larger magnitude = lower threshold (more sensitive)
+    // Lower rate of change or smaller magnitude = higher threshold (less sensitive)
+    
+    float rateFactor = 1.0 + (abs(loadChangeRate) * RATE_SENSITIVITY);
+    float magnitudeFactor = 1.0 + (loadChangeMagnitude * MAGNITUDE_SENSITIVITY);
+    
+    // Combine factors (use the more sensitive one)
+    float combinedFactor = max(rateFactor, magnitudeFactor);
+    
+    // Invert: higher rate/magnitude = lower threshold (more sensitive)
+    // So we divide base threshold by the factor
+    float thresholdMultiplier = 1.0 / combinedFactor;
+    
+    // Clamp multiplier to reasonable bounds
+    thresholdMultiplier = constrain(thresholdMultiplier, MIN_THRESHOLD_MULTIPLIER, MAX_THRESHOLD_MULTIPLIER);
+    
+    // Update dynamic thresholds using current base thresholds (which can be changed via serial)
+    dynamicThreshold1 = threshold1 * thresholdMultiplier;
+    dynamicThreshold2 = threshold2 * thresholdMultiplier;
+    
+    // Ensure threshold2 is always greater than threshold1
+    if (dynamicThreshold2 <= dynamicThreshold1) {
+        dynamicThreshold2 = dynamicThreshold1 + 5.0;
+    }
+    
+    // Update previous load for next calculation
+    prevLoad = currentLoad;
+}
+
 float getLoadScaling() {
     smoothedLoad = (LOAD_ALPHA * latestValidLoad) + ((1.0 - LOAD_ALPHA) * smoothedLoad);
     
-    if (smoothedLoad < threshold1) {
+    // Use dynamic thresholds instead of static ones
+    if (smoothedLoad < dynamicThreshold1) {
         return LOAD_SCALE_MAX;
-    } else if (smoothedLoad >= threshold2) {
+    } else if (smoothedLoad >= dynamicThreshold2) {
         return LOAD_SCALE_MIN;
     } else {
-        float loadRatio = (smoothedLoad - threshold1) / (float)(threshold2 - threshold1);
+        float loadRatio = (smoothedLoad - dynamicThreshold1) / (dynamicThreshold2 - dynamicThreshold1);
         return LOAD_SCALE_MAX - (loadRatio * (LOAD_SCALE_MAX - LOAD_SCALE_MIN));
     }
 }
 
 float getAdaptiveKp(float baseKp) {
-    if (smoothedLoad < threshold1) {
+    // Use dynamic thresholds instead of static ones
+    if (smoothedLoad < dynamicThreshold1) {
         return baseKp;
-    } else if (smoothedLoad >= threshold2) {
+    } else if (smoothedLoad >= dynamicThreshold2) {
         return baseKp * (1.0 - KP_DAMPING_FACTOR);
     } else {
-        float loadRatio = (smoothedLoad - threshold1) / (float)(threshold2 - threshold1);
+        float loadRatio = (smoothedLoad - dynamicThreshold1) / (dynamicThreshold2 - dynamicThreshold1);
         float damping = 1.0 - (loadRatio * KP_DAMPING_FACTOR);
         return baseKp * damping;
     }
@@ -481,13 +539,24 @@ void parseThresholds(String data) {
     String t1Str = data.substring(0, commaIndex);
     String t2Str = data.substring(commaIndex + 1);
     
+    // Update base thresholds (dynamic thresholds will be calculated from these)
     threshold1 = t1Str.toInt();
     threshold2 = t2Str.toInt();
     
-    Serial.print("Thresholds: T1=");
+    // Also update base constants for dynamic calculation
+    // Note: We can't modify const, so we'll use threshold1/threshold2 as base
+    // But dynamic thresholds will override these
+    
+    Serial.print("Base Thresholds Updated: T1=");
     Serial.print(threshold1);
     Serial.print(", T2=");
     Serial.println(threshold2);
+    Serial.print("Current Dynamic Thresholds: T1=");
+    Serial.print(dynamicThreshold1, 2);
+    Serial.print(", T2=");
+    Serial.print(dynamicThreshold2, 2);
+    Serial.println("");
+    Serial.println("(Dynamic thresholds adjust based on rate of change)");
     Serial.println("");
 }
 
@@ -513,6 +582,13 @@ void resetSystem() {
     error1 = 0.0; error2 = 0.0; error3 = 0.0;
     prevError1 = 0.0; prevError2 = 0.0; prevError3 = 0.0;
     ActVelo1 = 0.0; ActVelo2 = 0.0; ActVelo3 = 0.0;
+    
+    // Reset dynamic threshold variables
+    prevLoad = 0.0;
+    loadChangeRate = 0.0;
+    loadChangeMagnitude = 0.0;
+    dynamicThreshold1 = threshold1;
+    dynamicThreshold2 = threshold2;
     
     // Reset admittance states
     resetAdmittance();
@@ -919,9 +995,17 @@ void loop() {
                 }
                 
                 latestValidLoad = rawLoad;
+                
+                // Calculate time step for rate of change calculation
+                float dt = loadCellInterval / 1000.0;  // Convert to seconds
+                
+                // Update dynamic thresholds based on rate of change
+                updateDynamicThresholds(latestValidLoad, dt);
+                
+                // Use dynamic thresholds for comparison
                 int roundValue = round(latestValidLoad);
                 
-                if (roundValue >= threshold2) {
+                if (roundValue >= dynamicThreshold2) {
                     manipulatorState = 1;
                     retreatHasBeenTriggered = true;
                     
@@ -929,7 +1013,7 @@ void loop() {
                         Serial.println("RETREAT");
                         retreatRequestSent = true;
                     }
-                } else if (roundValue >= threshold1) {
+                } else if (roundValue >= dynamicThreshold1) {
                     manipulatorState = 1;
                 } else {
                     manipulatorState = 0;
@@ -1060,6 +1144,14 @@ void loop() {
             Serial.print(latestValidLoad, 2);
             Serial.print(",scale:");
             Serial.print(currentScale, 2);
+            Serial.print(",thresh1:");
+            Serial.print(dynamicThreshold1, 2);
+            Serial.print(",thresh2:");
+            Serial.print(dynamicThreshold2, 2);
+            Serial.print(",rate:");
+            Serial.print(loadChangeRate, 2);
+            Serial.print(",mag:");
+            Serial.print(loadChangeMagnitude, 2);
             Serial.print(",pos:");
             Serial.print(ActPos1, 2);
             Serial.print(",");

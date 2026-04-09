@@ -212,8 +212,26 @@ void ControlHandler::processArduinoFeedback(std::string& arduinoFeedbackState,
         if (load_value != -1.0f) {
             modbusHandler.writeFloat(ModbusAddr::REALTIME_LOAD_CELL, load_value);
         }
+        
+        float thresh1_value = serialHandler.parseValue(resultString, "thresh1:");
+        if (thresh1_value != -1.0f) {
+            modbusHandler.writeFloat(ModbusAddr::DYNAMIC_THRESH_1, thresh1_value);
+        }
+        
+        float thresh2_value = serialHandler.parseValue(resultString, "thresh2:");
+        if (thresh2_value != -1.0f) {
+            modbusHandler.writeFloat(ModbusAddr::DYNAMIC_THRESH_2, thresh2_value);
+        }
+        
+        float rate_value = serialHandler.parseValue(resultString, "rate:");
+        if (rate_value != -1.0f) {
+            modbusHandler.writeFloat(ModbusAddr::RATE_OF_CHANGE, rate_value);
+        }
     } else {
         modbusHandler.writeFloat(ModbusAddr::REALTIME_LOAD_CELL, 0.0f);
+        modbusHandler.writeFloat(ModbusAddr::DYNAMIC_THRESH_1, 0.0f);
+        modbusHandler.writeFloat(ModbusAddr::DYNAMIC_THRESH_2, 0.0f);
+        modbusHandler.writeFloat(ModbusAddr::RATE_OF_CHANGE, 0.0f);
     }
 }
 

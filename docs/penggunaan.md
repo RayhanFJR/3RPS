@@ -83,6 +83,10 @@ Sistem dikontrol melalui register Modbus yang dapat diakses dari HMI:
 | Register | Address | Fungsi |
 |----------|---------|--------|
 | JUMLAH_CYCLE | 132 | Jumlah cycle rehabilitasi |
+| DYNAMIC_THRESH_1 | 134-135 | Real-time nilai threshold 1 Dinamis (Float) |
+| DYNAMIC_THRESH_2 | 136-137 | Real-time nilai threshold 2 Dinamis (Float) |
+| RATE_OF_CHANGE | 138-139 | Real-time nilai laju perubahan gaya N/s (Float) |
+
 
 ## Operasi Manual
 
