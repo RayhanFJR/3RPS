@@ -30,7 +30,7 @@ int threshold2 = 40;
 long loadCellOffset = 0;
 float latestValidLoad = 0.0;
 
-// Dynamic Threshold Parameters (Rate of Change Based)
+// Dynamic Threshold Parameters
 float dynamicThreshold1 = 20.0;
 float dynamicThreshold2 = 40.0;
 float prevLoad = 0.0;
@@ -69,87 +69,68 @@ const int encoderInterval = 1;
 const int veloInterval = 10000;
 const int CTCcalculationInterval = 100;
 const int PDcalculationInterval = 100;
-const int admittanceUpdateInterval = 10;  // 10ms = 100Hz
+const int admittanceUpdateInterval = 10;
 
 //==================================================================
 // ADMITTANCE CONTROL PARAMETERS
+// Transfer Function: Z(s) = F_ext / (M*s^2 + B(t)*s + K(t))
+// K dan B DINAMIS dari Hill-Zajac Muscle Model
 //==================================================================
-// Transfer Function: Z(s) = F_external / (M*s^2 + B(t)*s + K(t))
-// K dan B sekarang DINAMIS mengikuti Hill-Zajac Muscle Model
 
-float M_adm = 101.7;    // Virtual mass (kg) - tetap
-float B_adm = 500.0;    // Virtual damping (N·s/m) - DINAMIS
-float K_adm = 614.1;    // Virtual stiffness (N/m) - DINAMIS
-
-// Compliance gain multiplier
+float M_adm = 101.7;   // Virtual mass (kg) - TETAP
+float B_adm = 500.0;   // Virtual damping (N.s/m) - DINAMIS
+float K_adm = 614.1;   // Virtual stiffness (N/m) - DINAMIS
 float admittanceGain = 1.0;
 
 //==================================================================
-// HILL-ZAJAC MUSCLE MODEL PARAMETERS
-// Referensi: Zajac (1989)
-// K = a * F_max * fv(0) * |fl'(l0)|
-// B = a * F_max * fl(l0) * |fv'(0)|
-// Dengan α = 0 (pennation diabaikan)
-// Dan a_inv = 1 - a supaya compliant saat gaya besar
+// HILL-ZAJAC MUSCLE MODEL PARAMETERS (Zajac 1989)
+// Prinsip compliance:
+//   Gaya kecil → a kecil → a_inv besar → K & B besar (kaku)
+//   Gaya besar → a besar → a_inv kecil → K & B kecil (compliant)
+//
+// K = a_inv * F_MAX * fv(0) * |fl'(l0)|   (pennation α = 0)
+// B = a_inv * F_MAX * fl(l0) * |fv'(0)|
 //==================================================================
 
-const float F_MAX       = 6000.0;  // Peak isometric force motor (N)
-const float FL_OPT      = 1.0;     // f_l(l0) = 1.0 at optimal length (Zajac 1989)
-const float FV_ZERO     = 1.0;     // f_v(0)  = 1.0 at isometric condition (Zajac 1989)
-const float FL_SLOPE    = 4.0;     // |f_l'(l0)| slope force-length curve (Zajac 1989)
-const float FV_SLOPE    = 4.7;     // |f_v'(0)| slope force-velocity curve (Zajac 1989)
-const float K_MIN       = 100.0;   // Minimum stiffness (N/m) - batas bawah K
-const float B_MIN       = 50.0;    // Minimum damping (N·s/m) - batas bawah B
-const float K_SCALE     = 0.025;   // Scaling factor K supaya range wajar (~614 saat 0N)
-const float B_SCALE     = 0.018;   // Scaling factor B supaya range wajar (~500 saat 0N)
-const float LOAD_MAX    = 100.0;   // Gaya maksimum load cell (N) untuk normalisasi
+const float F_MAX    = 6000.0;  // Peak isometric force (N)
+const float FL_OPT   = 1.0;     // f_l(l0) nilai di optimal length
+const float FV_ZERO  = 1.0;     // f_v(0) nilai saat isometric
+const float FL_SLOPE = 4.0;     // |f_l'(l0)| slope force-length
+const float FV_SLOPE = 4.7;     // |f_v'(0)| slope force-velocity
+const float K_MIN    = 100.0;   // Batas bawah K (N/m)
+const float B_MIN    = 50.0;    // Batas bawah B (N.s/m)
+const float K_SCALE  = 0.025;   // Scaling K → ~600 saat load=0
+const float B_SCALE  = 0.018;   // Scaling B → ~500 saat load=0
+const float LOAD_MAX = 100.0;   // Range maksimum load cell (N)
 
-// Variabel monitoring K dan B (untuk serial print)
+// Variabel monitoring Hill-Zajac
+float currentActivation = 0.0;
 float currentK = 614.1;
 float currentB = 500.0;
-float currentActivation = 0.0;
 
-// Trajectory pause parameters
+// Trajectory pause
 const float FORCE_PAUSE_THRESHOLD = 5.0;
 bool trajectoryPaused = false;
-float pausedRefPos1 = 0.0;
-float pausedRefPos2 = 0.0;
-float pausedRefPos3 = 0.0;
-float pausedRefVelo1 = 0.0;
-float pausedRefVelo2 = 0.0;
-float pausedRefVelo3 = 0.0;
-float pausedRefFc1 = 0.0;
-float pausedRefFc2 = 0.0;
-float pausedRefFc3 = 0.0;
+float pausedRefPos1 = 0.0, pausedRefPos2 = 0.0, pausedRefPos3 = 0.0;
+float pausedRefVelo1 = 0.0, pausedRefVelo2 = 0.0, pausedRefVelo3 = 0.0;
+float pausedRefFc1 = 0.0, pausedRefFc2 = 0.0, pausedRefFc3 = 0.0;
 
 // Admittance state variables
-float Z_adm = 0.0;
-float Zdot_adm = 0.0;
-float Zddot_adm = 0.0;
-float Z_adm_prev = 0.0;
-float Zdot_adm_prev = 0.0;
+float Z_adm = 0.0, Zdot_adm = 0.0, Zddot_adm = 0.0;
+float Z_adm_prev = 0.0, Zdot_adm_prev = 0.0;
 
-// Enable/disable admittance control
 bool admittanceEnabled = true;
-
-// Admittance offset
 float Z_offset = 0.0;
 
 //==================================================================
 // PIN DEFINITIONS
 //==================================================================
 
-const int RPWM1 = 3, LPWM1 = 5;
-const int RPWM2 = 6, LPWM2 = 9;
+const int RPWM1 = 3,  LPWM1 = 5;
+const int RPWM2 = 6,  LPWM2 = 9;
 const int RPWM3 = 10, LPWM3 = 11;
-
-const int ENC1 = 4;
-const int ENC2 = 2;
-const int ENC3 = 8;
-
-const int CurrSen1 = A0;
-const int CurrSen2 = A1;
-const int CurrSen3 = A2;
+const int ENC1 = 4, ENC2 = 2, ENC3 = 8;
+const int CurrSen1 = A0, CurrSen2 = A1, CurrSen3 = A2;
 
 //==================================================================
 // SYSTEM STATE VARIABLES
@@ -159,61 +140,41 @@ int operatingMode = 0;
 int manualCommand = 0;
 int manipulatorState = 0;
 bool retreatHasBeenTriggered = false;
-
 String receivedData = "";
 
 //==================================================================
 // MOTOR 1 VARIABLES
 //==================================================================
-
-float kp1 = 110.0, kd1 = 0.1;
-float kpc1 = 30.0, kdc1 = 0.1;
-
+float kp1 = 110.0, kd1 = 0.1, kpc1 = 30.0, kdc1 = 0.1;
 float refPos1 = 0.0, refVelo1 = 0.0, refFc1 = 0.0, refCurrent1 = 0.0;
-float refAccel1 = 0.0, prevRefVelo1 = 0.0;
-
 float ActPos1 = 0.0, ActVelo1 = 0.0, ActCurrent1 = 0.0;
 int position1 = 0, prevState1 = 0;
-
 float controlValue1 = 0.0, ErrPos1 = 0.0, error1 = 0.0;
 float prevError1 = 0.0, prevPos1 = 0.0;
 
 //==================================================================
 // MOTOR 2 VARIABLES
 //==================================================================
-
-float kp2 = 142.0, kd2 = 0.6;
-float kpc2 = 33.0, kdc2 = 0.1;
-
+float kp2 = 142.0, kd2 = 0.6, kpc2 = 33.0, kdc2 = 0.1;
 float refPos2 = 0.0, refVelo2 = 0.0, refFc2 = 0.0, refCurrent2 = 0.0;
-float refAccel2 = 0.0, prevRefVelo2 = 0.0;
-
 float ActPos2 = 0.0, ActVelo2 = 0.0, ActCurrent2 = 0.0;
 int position2 = 0, prevState2 = 0;
-
 float controlValue2 = 0.0, ErrPos2 = 0.0, error2 = 0.0;
 float prevError2 = 0.0, prevPos2 = 0.0;
 
 //==================================================================
 // MOTOR 3 VARIABLES
 //==================================================================
-
-float kp3 = 150.0, kd3 = 0.3;
-float kpc3 = 38.0, kdc3 = 0.1;
-
+float kp3 = 150.0, kd3 = 0.3, kpc3 = 38.0, kdc3 = 0.1;
 float refPos3 = 0.0, refVelo3 = 0.0, refFc3 = 0.0, refCurrent3 = 0.0;
-float refAccel3 = 0.0, prevRefVelo3 = 0.0;
-
 float ActPos3 = 0.0, ActVelo3 = 0.0, ActCurrent3 = 0.0;
 int position3 = 0, prevState3 = 0;
-
 float controlValue3 = 0.0, ErrPos3 = 0.0, error3 = 0.0;
 float prevError3 = 0.0, prevPos3 = 0.0;
 
 //==================================================================
 // TIMING VARIABLES
 //==================================================================
-
 long lastLoadTime = 0;
 long lastEncTime = 0;
 long lastVeloTime = 0;
@@ -223,108 +184,75 @@ long lastPrnTime = 0;
 long lastAdmittanceTime = 0;
 
 //==================================================================
-// HILL-ZAJAC MUSCLE MODEL FUNCTION
-// Update K dan B secara dinamis berdasarkan gaya eksternal
-//
-// Prinsip:
-//   - Gaya kecil → activation rendah → a_inv tinggi → K & B besar (kaku)
-//   - Gaya besar → activation tinggi → a_inv kecil → K & B kecil (compliant)
-//
-// Persamaan (Zajac 1989, α = 0):
-//   K = a_inv * F_MAX * fv(0) * |fl'(l0)|
-//   B = a_inv * F_MAX * fl(l0) * |fv'(0)|
+// HILL-ZAJAC MUSCLE MODEL
+// Hitung K dan B dinamis berdasarkan gaya eksternal
 //==================================================================
-
 void updateMuscleAdmittance(float F_external) {
-    // Normalisasi gaya ke activation (0.0 - 1.0)
-    float a = F_external / LOAD_MAX;
-    a = constrain(a, 0.0, 1.0);
+    // Normalisasi gaya → activation (0.0 - 1.0)
+    float a = constrain(F_external / LOAD_MAX, 0.0, 1.0);
 
-    // Invers activation: saat gaya besar → a_inv kecil → K & B kecil (compliant)
+    // Invers: gaya besar → a_inv kecil → K & B kecil (compliant)
     float a_inv = 1.0 - a;
 
-    // Hitung K dan B dari model Hill-Zajac (Zajac 1989)
     // K = a_inv * F_MAX * fv(0) * |fl'(l0)|
     float K_muscle = a_inv * F_MAX * FV_ZERO * FL_SLOPE;
 
     // B = a_inv * F_MAX * fl(l0) * |fv'(0)|
     float B_muscle = a_inv * F_MAX * FL_OPT * FV_SLOPE;
 
-    // Scale down dan terapkan batas minimum
+    // Scale dan terapkan batas minimum
     K_adm = max(K_muscle * K_SCALE, K_MIN);
     B_adm = max(B_muscle * B_SCALE, B_MIN);
 
     // Simpan untuk monitoring
+    currentActivation = a;
     currentK = K_adm;
     currentB = B_adm;
-    currentActivation = a;
 }
 
 //==================================================================
-// ADMITTANCE CONTROL FUNCTIONS
+// ADMITTANCE CONTROL
 //==================================================================
-
 void updateAdmittanceControl(float F_external, float dt) {
-    // Admittance equation: M*Z'' + B(t)*Z' + K(t)*Z = F_external
-    // K dan B sekarang dinamis dari Hill-Zajac model
-
+    // M*Z'' + B(t)*Z' + K(t)*Z = F_ext
     float F_scaled = F_external * admittanceGain;
 
-    // Hitung akselerasi
     Zddot_adm = (F_scaled - B_adm * Zdot_adm - K_adm * Z_adm) / M_adm;
+    Zdot_adm  = Zdot_adm_prev + Zddot_adm * dt;
+    Z_adm     = Z_adm_prev + Zdot_adm * dt;
 
-    // Euler integration velocity
-    Zdot_adm = Zdot_adm_prev + Zddot_adm * dt;
-
-    // Euler integration position
-    Z_adm = Z_adm_prev + Zdot_adm * dt;
-
-    // Update previous values
-    Z_adm_prev = Z_adm;
+    Z_adm_prev  = Z_adm;
     Zdot_adm_prev = Zdot_adm;
 }
 
 void resetAdmittance() {
-    Z_adm = 0.0;
-    Zdot_adm = 0.0;
-    Zddot_adm = 0.0;
-    Z_adm_prev = 0.0;
-    Zdot_adm_prev = 0.0;
+    Z_adm = 0.0; Zdot_adm = 0.0; Zddot_adm = 0.0;
+    Z_adm_prev = 0.0; Zdot_adm_prev = 0.0;
     Z_offset = 0.0;
-
-    // Reset K dan B ke nilai default
-    K_adm = 614.1;
-    B_adm = 500.0;
-    currentK = 614.1;
-    currentB = 500.0;
+    K_adm = 614.1; B_adm = 500.0;
+    currentK = 614.1; currentB = 500.0;
     currentActivation = 0.0;
-}
-
-void setAdmittanceOffset(float offset) {
-    Z_offset = offset;
 }
 
 //==================================================================
 // LOAD-BASED ADAPTIVE FUNCTIONS
 //==================================================================
-
 void updateDynamicThresholds(float currentLoad, float dt) {
-    float currentRate = 0.0;
-    if (dt > 0.0) {
-        currentRate = (currentLoad - prevLoad) / dt;
-    }
+    float currentRate = (dt > 0.0) ? (currentLoad - prevLoad) / dt : 0.0;
 
-    loadChangeRate = (RATE_SMOOTHING_ALPHA * currentRate) + ((1.0 - RATE_SMOOTHING_ALPHA) * loadChangeRate);
+    loadChangeRate = (RATE_SMOOTHING_ALPHA * currentRate) +
+                     ((1.0 - RATE_SMOOTHING_ALPHA) * loadChangeRate);
     loadChangeMagnitude = abs(currentLoad - prevLoad);
 
-    float rateFactor = 1.0 + (abs(loadChangeRate) * RATE_SENSITIVITY);
+    float rateFactor      = 1.0 + (abs(loadChangeRate) * RATE_SENSITIVITY);
     float magnitudeFactor = 1.0 + (loadChangeMagnitude * MAGNITUDE_SENSITIVITY);
-    float combinedFactor = max(rateFactor, magnitudeFactor);
-    float thresholdMultiplier = 1.0 / combinedFactor;
-    thresholdMultiplier = constrain(thresholdMultiplier, MIN_THRESHOLD_MULTIPLIER, MAX_THRESHOLD_MULTIPLIER);
+    float combinedFactor  = max(rateFactor, magnitudeFactor);
+    float multiplier      = constrain(1.0 / combinedFactor,
+                                      MIN_THRESHOLD_MULTIPLIER,
+                                      MAX_THRESHOLD_MULTIPLIER);
 
-    dynamicThreshold1 = threshold1 * thresholdMultiplier;
-    dynamicThreshold2 = threshold2 * thresholdMultiplier;
+    dynamicThreshold1 = threshold1 * multiplier;
+    dynamicThreshold2 = threshold2 * multiplier;
 
     if (dynamicThreshold2 <= dynamicThreshold1) {
         dynamicThreshold2 = dynamicThreshold1 + 5.0;
@@ -334,15 +262,17 @@ void updateDynamicThresholds(float currentLoad, float dt) {
 }
 
 float getLoadScaling() {
-    smoothedLoad = (LOAD_ALPHA * latestValidLoad) + ((1.0 - LOAD_ALPHA) * smoothedLoad);
+    smoothedLoad = (LOAD_ALPHA * latestValidLoad) +
+                   ((1.0 - LOAD_ALPHA) * smoothedLoad);
 
     if (smoothedLoad < dynamicThreshold1) {
         return LOAD_SCALE_MAX;
     } else if (smoothedLoad >= dynamicThreshold2) {
         return LOAD_SCALE_MIN;
     } else {
-        float loadRatio = (smoothedLoad - dynamicThreshold1) / (dynamicThreshold2 - dynamicThreshold1);
-        return LOAD_SCALE_MAX - (loadRatio * (LOAD_SCALE_MAX - LOAD_SCALE_MIN));
+        float ratio = (smoothedLoad - dynamicThreshold1) /
+                      (dynamicThreshold2 - dynamicThreshold1);
+        return LOAD_SCALE_MAX - (ratio * (LOAD_SCALE_MAX - LOAD_SCALE_MIN));
     }
 }
 
@@ -352,32 +282,31 @@ float getAdaptiveKp(float baseKp) {
     } else if (smoothedLoad >= dynamicThreshold2) {
         return baseKp * (1.0 - KP_DAMPING_FACTOR);
     } else {
-        float loadRatio = (smoothedLoad - dynamicThreshold1) / (dynamicThreshold2 - dynamicThreshold1);
-        float damping = 1.0 - (loadRatio * KP_DAMPING_FACTOR);
-        return baseKp * damping;
+        float ratio = (smoothedLoad - dynamicThreshold1) /
+                      (dynamicThreshold2 - dynamicThreshold1);
+        return baseKp * (1.0 - ratio * KP_DAMPING_FACTOR);
     }
 }
 
 //==================================================================
-// CONTROL FUNCTIONS
+// BASIC CONTROL FUNCTIONS
 //==================================================================
-
 float Error(float ref, float act) {
     return ref - act;
 }
 
-float CTC(float PosError, float kp, float VeloError, float kd, float ForceID, float GR, float kt) {
-    return ((PosError * kp) + (VeloError * kd) + ForceID) * GR * kt;
+float CTC(float PosErr, float kp, float VeloErr, float kd,
+          float ForceID, float GR, float kt) {
+    return ((PosErr * kp) + (VeloErr * kd) + ForceID) * GR * kt;
 }
 
-float PD(float error, float kpc, float errordev, float kdc) {
-    return (error * kpc) + (errordev * kdc);
+float PD(float err, float kpc, float errdev, float kdc) {
+    return (err * kpc) + (errdev * kdc);
 }
 
 //==================================================================
-// SENSOR READING FUNCTIONS
+// SENSOR READING
 //==================================================================
-
 long readHX711() {
     long result = 0;
     while (digitalRead(LOADCELL_DOUT_PIN));
@@ -386,9 +315,7 @@ long readHX711() {
         digitalWrite(LOADCELL_SCK_PIN, HIGH);
         delayMicroseconds(1);
         result = result << 1;
-        if (digitalRead(LOADCELL_DOUT_PIN)) {
-            result++;
-        }
+        if (digitalRead(LOADCELL_DOUT_PIN)) result++;
         digitalWrite(LOADCELL_SCK_PIN, LOW);
         delayMicroseconds(1);
     }
@@ -398,93 +325,52 @@ long readHX711() {
     digitalWrite(LOADCELL_SCK_PIN, LOW);
     delayMicroseconds(1);
 
-    if (result & 0x800000) {
-        result |= ~0xFFFFFF;
-    }
-
+    if (result & 0x800000) result |= ~0xFFFFFF;
     return result;
 }
 
 float avg1() {
-    float val1 = 0;
-    for (int i = 0; i < nSamples; i++) {
-        val1 += analogRead(CurrSen1);
-        delay(1);
-    }
-    return val1 / adcMax / nSamples;
+    float val = 0;
+    for (int i = 0; i < nSamples; i++) { val += analogRead(CurrSen1); delay(1); }
+    return val / adcMax / nSamples;
 }
 
 float avg2() {
-    float val2 = 0;
-    for (int i = 0; i < nSamples; i++) {
-        val2 += analogRead(CurrSen2);
-        delay(1);
-    }
-    return val2 / adcMax / nSamples;
+    float val = 0;
+    for (int i = 0; i < nSamples; i++) { val += analogRead(CurrSen2); delay(1); }
+    return val / adcMax / nSamples;
 }
 
 float avg3() {
-    float val3 = 0;
-    for (int i = 0; i < nSamples; i++) {
-        val3 += analogRead(CurrSen3);
-        delay(1);
-    }
-    return val3 / adcMax / nSamples;
+    float val = 0;
+    for (int i = 0; i < nSamples; i++) { val += analogRead(CurrSen3); delay(1); }
+    return val / adcMax / nSamples;
 }
 
 //==================================================================
-// COMMAND PARSING FUNCTIONS
+// COMMAND PARSING
 //==================================================================
-
 void parseTrajectoryCommand(String data, bool isRetreat) {
     data.replace("S", "");
     data.replace("R", "");
 
-    int commaIndex1 = data.indexOf(',');
-    String refPos1Str = data.substring(0, commaIndex1);
-    data = data.substring(commaIndex1 + 1);
-
-    int commaIndex2 = data.indexOf(',');
-    String refPos2Str = data.substring(0, commaIndex2);
-    data = data.substring(commaIndex2 + 1);
-
-    int commaIndex3 = data.indexOf(',');
-    String refPos3Str = data.substring(0, commaIndex3);
-    data = data.substring(commaIndex3 + 1);
-
-    int commaIndex4 = data.indexOf(',');
-    String refVelo1Str = data.substring(0, commaIndex4);
-    data = data.substring(commaIndex4 + 1);
-
-    int commaIndex5 = data.indexOf(',');
-    String refVelo2Str = data.substring(0, commaIndex5);
-    data = data.substring(commaIndex5 + 1);
-
-    int commaIndex6 = data.indexOf(',');
-    String refVelo3Str = data.substring(0, commaIndex6);
-    data = data.substring(commaIndex6 + 1);
-
-    int commaIndex7 = data.indexOf(',');
-    String refFc1Str = data.substring(0, commaIndex7);
-    data = data.substring(commaIndex7 + 1);
-
-    int commaIndex8 = data.indexOf(',');
-    String refFc2Str = data.substring(0, commaIndex8);
-    String refFc3Str = data.substring(commaIndex8 + 1);
-
-    if (trajectoryPaused) {
-        return;
+    // Parse 9 nilai: pos1,pos2,pos3,velo1,velo2,velo3,fc1,fc2,fc3
+    float vals[9];
+    int idx = 0;
+    for (int i = 0; i < 8; i++) {
+        int comma = data.indexOf(',');
+        if (comma < 0) break;
+        vals[idx++] = data.substring(0, comma).toFloat();
+        data = data.substring(comma + 1);
     }
+    vals[idx] = data.toFloat();
 
-    refPos1 = refPos1Str.toFloat();
-    refPos2 = refPos2Str.toFloat();
-    refPos3 = refPos3Str.toFloat();
-    refVelo1 = refVelo1Str.toFloat();
-    refVelo2 = refVelo2Str.toFloat();
-    refVelo3 = refVelo3Str.toFloat();
-    refFc1 = refFc1Str.toFloat();
-    refFc2 = refFc2Str.toFloat();
-    refFc3 = refFc3Str.toFloat();
+    // Jangan update kalau trajectory sedang paused
+    if (trajectoryPaused) return;
+
+    refPos1 = vals[0]; refPos2 = vals[1]; refPos3 = vals[2];
+    refVelo1 = vals[3]; refVelo2 = vals[4]; refVelo3 = vals[5];
+    refFc1 = vals[6]; refFc2 = vals[7]; refFc3 = vals[8];
 
     if (isRetreat) {
         refVelo1 *= RETREAT_VELOCITY_SCALE;
@@ -495,114 +381,68 @@ void parseTrajectoryCommand(String data, bool isRetreat) {
 
 void parseOuterLoopGains(String data) {
     data.replace("K", "");
+    int c1 = data.indexOf(',');
+    int motorNum = data.substring(0, c1).toInt();
+    data = data.substring(c1 + 1);
+    int c2 = data.indexOf(',');
+    float newKp = data.substring(0, c2).toFloat();
+    float newKd = data.substring(c2 + 1).toFloat();
 
-    int commaIndex1 = data.indexOf(',');
-    String motorNumStr = data.substring(0, commaIndex1);
-    data = data.substring(commaIndex1 + 1);
-
-    int commaIndex2 = data.indexOf(',');
-    String kpStr = data.substring(0, commaIndex2);
-    String kdStr = data.substring(commaIndex2 + 1);
-
-    int motorNum = motorNumStr.toInt();
-    float newKp = kpStr.toFloat();
-    float newKd = kdStr.toFloat();
-
-    if (motorNum == 1) {
-        kp1 = newKp; kd1 = newKd;
-        Serial.print("Motor 1 Outer Loop: Kp=");
-        Serial.print(kp1); Serial.print(", Kd="); Serial.println(kd1);
-    } else if (motorNum == 2) {
-        kp2 = newKp; kd2 = newKd;
-        Serial.print("Motor 2 Outer Loop: Kp=");
-        Serial.print(kp2); Serial.print(", Kd="); Serial.println(kd2);
-    } else if (motorNum == 3) {
-        kp3 = newKp; kd3 = newKd;
-        Serial.print("Motor 3 Outer Loop: Kp=");
-        Serial.print(kp3); Serial.print(", Kd="); Serial.println(kd3);
-    }
-    Serial.println("");
+    if (motorNum == 1) { kp1 = newKp; kd1 = newKd; Serial.print("Motor 1 Kp="); Serial.print(kp1); Serial.print(" Kd="); Serial.println(kd1); }
+    else if (motorNum == 2) { kp2 = newKp; kd2 = newKd; Serial.print("Motor 2 Kp="); Serial.print(kp2); Serial.print(" Kd="); Serial.println(kd2); }
+    else if (motorNum == 3) { kp3 = newKp; kd3 = newKd; Serial.print("Motor 3 Kp="); Serial.print(kp3); Serial.print(" Kd="); Serial.println(kd3); }
 }
 
 void parseInnerLoopGains(String data) {
     data.replace("P", "");
+    int c1 = data.indexOf(',');
+    int motorNum = data.substring(0, c1).toInt();
+    data = data.substring(c1 + 1);
+    int c2 = data.indexOf(',');
+    float newKpc = data.substring(0, c2).toFloat();
+    float newKdc = data.substring(c2 + 1).toFloat();
 
-    int commaIndex1 = data.indexOf(',');
-    String motorNumStr = data.substring(0, commaIndex1);
-    data = data.substring(commaIndex1 + 1);
-
-    int commaIndex2 = data.indexOf(',');
-    String kpcStr = data.substring(0, commaIndex2);
-    String kdcStr = data.substring(commaIndex2 + 1);
-
-    int motorNum = motorNumStr.toInt();
-    float newKpc = kpcStr.toFloat();
-    float newKdc = kdcStr.toFloat();
-
-    if (motorNum == 1) {
-        kpc1 = newKpc; kdc1 = newKdc;
-        Serial.print("Motor 1 Inner Loop: Kpc=");
-        Serial.print(kpc1); Serial.print(", Kdc="); Serial.println(kdc1);
-    } else if (motorNum == 2) {
-        kpc2 = newKpc; kdc2 = newKdc;
-        Serial.print("Motor 2 Inner Loop: Kpc=");
-        Serial.print(kpc2); Serial.print(", Kdc="); Serial.println(kdc2);
-    } else if (motorNum == 3) {
-        kpc3 = newKpc; kdc3 = newKdc;
-        Serial.print("Motor 3 Inner Loop: Kpc=");
-        Serial.print(kpc3); Serial.print(", Kdc="); Serial.println(kdc3);
-    }
-    Serial.println("");
+    if (motorNum == 1) { kpc1 = newKpc; kdc1 = newKdc; Serial.print("Motor 1 Kpc="); Serial.print(kpc1); Serial.print(" Kdc="); Serial.println(kdc1); }
+    else if (motorNum == 2) { kpc2 = newKpc; kdc2 = newKdc; Serial.print("Motor 2 Kpc="); Serial.print(kpc2); Serial.print(" Kdc="); Serial.println(kdc2); }
+    else if (motorNum == 3) { kpc3 = newKpc; kdc3 = newKdc; Serial.print("Motor 3 Kpc="); Serial.print(kpc3); Serial.print(" Kdc="); Serial.println(kdc3); }
 }
 
 void parseAdmittanceParams(String data) {
     data.replace("ADM", "");
+    int c = data.indexOf(',');
+    String param = data.substring(0, c);
+    float val = data.substring(c + 1).toFloat();
 
-    int commaIndex1 = data.indexOf(',');
-    String paramStr = data.substring(0, commaIndex1);
-    String valueStr = data.substring(commaIndex1 + 1);
-
-    float value = valueStr.toFloat();
-
-    if (paramStr == "M") {
-        M_adm = value;
+    if (param == "M") {
+        M_adm = val;
         Serial.print("Virtual Mass M = "); Serial.println(M_adm);
-    } else if (paramStr == "G") {
-        admittanceGain = value;
+    } else if (param == "G") {
+        admittanceGain = val;
         Serial.print("Admittance Gain = "); Serial.println(admittanceGain);
-    } else if (paramStr == "KMIN") {
-        // Override K_MIN tidak bisa karena const, tapi bisa set langsung K_adm
-        Serial.println("Gunakan K_MIN di konstanta kode untuk ubah batas minimum K");
-    } else if (paramStr == "BMIN") {
-        Serial.println("Gunakan B_MIN di konstanta kode untuk ubah batas minimum B");
     } else {
-        Serial.println("Parameter tersedia: M, G");
-        Serial.println("Catatan: K dan B sekarang DINAMIS dari Hill-Zajac model");
-        Serial.println("Ubah FL_SLOPE, FV_SLOPE, K_SCALE, B_SCALE di kode untuk tuning");
+        Serial.println("Parameter: M (mass), G (gain)");
+        Serial.println("K dan B dinamis dari Hill-Zajac, tuning via K_SCALE/B_SCALE di kode");
     }
 }
 
 void parseThresholds(String data) {
     data.replace("T", "");
+    int c = data.indexOf(',');
+    threshold1 = data.substring(0, c).toInt();
+    threshold2 = data.substring(c + 1).toInt();
+    dynamicThreshold1 = (float)threshold1;
+    dynamicThreshold2 = (float)threshold2;
+    Serial.print("Thresholds: T1="); Serial.print(threshold1);
+    Serial.print(", T2="); Serial.println(threshold2);
+}
 
-    int commaIndex = data.indexOf(',');
-    String t1Str = data.substring(0, commaIndex);
-    String t2Str = data.substring(commaIndex + 1);
-
-    threshold1 = t1Str.toInt();
-    threshold2 = t2Str.toInt();
-
-    Serial.print("Base Thresholds Updated: T1=");
-    Serial.print(threshold1);
-    Serial.print(", T2=");
-    Serial.println(threshold2);
-    Serial.print("Current Dynamic Thresholds: T1=");
-    Serial.print(dynamicThreshold1, 2);
-    Serial.print(", T2=");
-    Serial.print(dynamicThreshold2, 2);
-    Serial.println("");
-    Serial.println("(Dynamic thresholds adjust based on rate of change)");
-    Serial.println("");
+//==================================================================
+// SYSTEM CONTROL
+//==================================================================
+void stopAllMotors() {
+    analogWrite(RPWM1, 0); analogWrite(LPWM1, 0);
+    analogWrite(RPWM2, 0); analogWrite(LPWM2, 0);
+    analogWrite(RPWM3, 0); analogWrite(LPWM3, 0);
 }
 
 void resetSystem() {
@@ -613,12 +453,11 @@ void resetSystem() {
     retreatRequestSent = false;
     trajectoryPaused = false;
 
-    analogWrite(RPWM1, 0); analogWrite(LPWM1, 0);
-    analogWrite(RPWM2, 0); analogWrite(LPWM2, 0);
-    analogWrite(RPWM3, 0); analogWrite(LPWM3, 0);
+    stopAllMotors();
 
     loadCellOffset = readHX711();
     smoothedLoad = 0.0;
+    latestValidLoad = 0.0;
 
     position1 = 0; position2 = 0; position3 = 0;
     ActPos1 = 0.0; ActPos2 = 0.0; ActPos3 = 0.0;
@@ -628,18 +467,15 @@ void resetSystem() {
     prevError1 = 0.0; prevError2 = 0.0; prevError3 = 0.0;
     ActVelo1 = 0.0; ActVelo2 = 0.0; ActVelo3 = 0.0;
 
-    // Reset dynamic threshold variables
     prevLoad = 0.0;
     loadChangeRate = 0.0;
     loadChangeMagnitude = 0.0;
-    dynamicThreshold1 = threshold1;
-    dynamicThreshold2 = threshold2;
+    dynamicThreshold1 = (float)threshold1;
+    dynamicThreshold2 = (float)threshold2;
 
-    // Reset admittance states + K dan B ke default
     resetAdmittance();
 
-    Serial.println("System Reset: Tare & Zero OK");
-    Serial.println("K dan B direset ke nilai default (Hill-Zajac)\n");
+    Serial.println("System Reset OK\n");
 }
 
 void emergencyStop() {
@@ -647,42 +483,37 @@ void emergencyStop() {
     manualCommand = 0;
     retreatHasBeenTriggered = false;
     retreatRequestSent = false;
-
-    analogWrite(RPWM1, 0); analogWrite(LPWM1, 0);
-    analogWrite(RPWM2, 0); analogWrite(LPWM2, 0);
-    analogWrite(RPWM3, 0); analogWrite(LPWM3, 0);
-
+    stopAllMotors();
     Serial.println("EMERGENCY_STOP");
 }
 
 //==================================================================
 // MOTOR CONTROL FUNCTIONS
 //==================================================================
-
 void updateEncoders() {
-    int currentState1 = digitalRead(ENC1);
-    if (currentState1 > prevState1) {
+    int s1 = digitalRead(ENC1);
+    if (s1 > prevState1) {
         if (controlValue1 > 0) position1++;
         else if (controlValue1 < 0) position1--;
     }
     ActPos1 = position1 * 0.245;
-    prevState1 = currentState1;
+    prevState1 = s1;
 
-    int currentState2 = digitalRead(ENC2);
-    if (currentState2 > prevState2) {
+    int s2 = digitalRead(ENC2);
+    if (s2 > prevState2) {
         if (controlValue2 > 0) position2++;
         else if (controlValue2 < 0) position2--;
     }
     ActPos2 = position2 * 0.245;
-    prevState2 = currentState2;
+    prevState2 = s2;
 
-    int currentState3 = digitalRead(ENC3);
-    if (currentState3 > prevState3) {
+    int s3 = digitalRead(ENC3);
+    if (s3 > prevState3) {
         if (controlValue3 > 0) position3++;
         else if (controlValue3 < 0) position3--;
     }
     ActPos3 = position3 * 0.245;
-    prevState3 = currentState3;
+    prevState3 = s3;
 }
 
 void updateVelocities() {
@@ -699,43 +530,29 @@ void calculateCTC() {
     ErrPos2 = Error(refPos2, ActPos2);
     ErrPos3 = Error(refPos3, ActPos3);
 
-    float ErrVelo1 = Error(refVelo1, ActVelo1);
-    float ErrVelo2 = Error(refVelo2, ActVelo2);
-    float ErrVelo3 = Error(refVelo3, ActVelo3);
-
-    float kp1_adaptive = getAdaptiveKp(kp1);
-    float kp2_adaptive = getAdaptiveKp(kp2);
-    float kp3_adaptive = getAdaptiveKp(kp3);
-
-    refCurrent1 = CTC(ErrPos1, kp1_adaptive, ErrVelo1, kd1, refFc1, GR, kt);
-    refCurrent2 = CTC(ErrPos2, kp2_adaptive, ErrVelo2, kd2, refFc2, GR, kt);
-    refCurrent3 = CTC(ErrPos3, kp3_adaptive, ErrVelo3, kd3, refFc3, GR, kt);
+    refCurrent1 = CTC(ErrPos1, getAdaptiveKp(kp1), Error(refVelo1, ActVelo1), kd1, refFc1, GR, kt);
+    refCurrent2 = CTC(ErrPos2, getAdaptiveKp(kp2), Error(refVelo2, ActVelo2), kd2, refFc2, GR, kt);
+    refCurrent3 = CTC(ErrPos3, getAdaptiveKp(kp3), Error(refVelo3, ActVelo3), kd3, refFc3, GR, kt);
 }
 
 void calculateCTCWithAdmittance() {
-    float refPos1_modified = refPos1 - (Z_adm * 1000.0);
-    float refPos2_modified = refPos2 - (Z_adm * 1000.0);
-    float refPos3_modified = refPos3 - (Z_adm * 1000.0);
+    // Modifikasi refPos berdasarkan displacement admittance
+    // Z_adm dalam meter, refPos dalam mm → kali 1000
+    float rp1 = refPos1 - (Z_adm * 1000.0);
+    float rp2 = refPos2 - (Z_adm * 1000.0);
+    float rp3 = refPos3 - (Z_adm * 1000.0);
 
-    float refVelo1_modified = refVelo1 - Zdot_adm;
-    float refVelo2_modified = refVelo2 - Zdot_adm;
-    float refVelo3_modified = refVelo3 - Zdot_adm;
+    float rv1 = refVelo1 - Zdot_adm;
+    float rv2 = refVelo2 - Zdot_adm;
+    float rv3 = refVelo3 - Zdot_adm;
 
-    ErrPos1 = Error(refPos1_modified, ActPos1);
-    ErrPos2 = Error(refPos2_modified, ActPos2);
-    ErrPos3 = Error(refPos3_modified, ActPos3);
+    ErrPos1 = Error(rp1, ActPos1);
+    ErrPos2 = Error(rp2, ActPos2);
+    ErrPos3 = Error(rp3, ActPos3);
 
-    float ErrVelo1 = Error(refVelo1_modified, ActVelo1);
-    float ErrVelo2 = Error(refVelo2_modified, ActVelo2);
-    float ErrVelo3 = Error(refVelo3_modified, ActVelo3);
-
-    float kp1_adaptive = getAdaptiveKp(kp1);
-    float kp2_adaptive = getAdaptiveKp(kp2);
-    float kp3_adaptive = getAdaptiveKp(kp3);
-
-    refCurrent1 = CTC(ErrPos1, kp1_adaptive, ErrVelo1, kd1, refFc1, GR, kt);
-    refCurrent2 = CTC(ErrPos2, kp2_adaptive, ErrVelo2, kd2, refFc2, GR, kt);
-    refCurrent3 = CTC(ErrPos3, kp3_adaptive, ErrVelo3, kd3, refFc3, GR, kt);
+    refCurrent1 = CTC(ErrPos1, getAdaptiveKp(kp1), Error(rv1, ActVelo1), kd1, refFc1, GR, kt);
+    refCurrent2 = CTC(ErrPos2, getAdaptiveKp(kp2), Error(rv2, ActVelo2), kd2, refFc2, GR, kt);
+    refCurrent3 = CTC(ErrPos3, getAdaptiveKp(kp3), Error(rv3, ActVelo3), kd3, refFc3, GR, kt);
 }
 
 void calculatePD() {
@@ -743,23 +560,19 @@ void calculatePD() {
     error2 = Error(refCurrent2, ActCurrent2);
     error3 = Error(refCurrent3, ActCurrent3);
 
-    float DerError1 = (error1 - prevError1) / 0.1;
-    float DerError2 = (error2 - prevError2) / 0.1;
-    float DerError3 = (error3 - prevError3) / 0.1;
-
-    controlValue1 = PD(error1, kpc1, DerError1, kdc1);
-    controlValue2 = PD(error2, kpc2, DerError2, kdc2);
-    controlValue3 = PD(error3, kpc3, DerError3, kdc3);
+    controlValue1 = PD(error1, kpc1, (error1 - prevError1) / 0.1, kdc1);
+    controlValue2 = PD(error2, kpc2, (error2 - prevError2) / 0.1, kdc2);
+    controlValue3 = PD(error3, kpc3, (error3 - prevError3) / 0.1, kdc3);
 
     prevError1 = error1;
     prevError2 = error2;
     prevError3 = error3;
 
     if (operatingMode == 1) {
-        float loadScale = getLoadScaling();
-        controlValue1 = constrain(controlValue1 * loadScale, -255, 255);
-        controlValue2 = constrain(controlValue2 * loadScale, -255, 255);
-        controlValue3 = constrain(controlValue3 * loadScale, -255, 255);
+        float scale = getLoadScaling();
+        controlValue1 = constrain(controlValue1 * scale, -255, 255);
+        controlValue2 = constrain(controlValue2 * scale, -255, 255);
+        controlValue3 = constrain(controlValue3 * scale, -255, 255);
     } else {
         controlValue1 = constrain(controlValue1, -255, 255);
         controlValue2 = constrain(controlValue2, -255, 255);
@@ -768,62 +581,33 @@ void calculatePD() {
 }
 
 void applyMotorControl() {
-    if (ErrPos1 > 0) {
-        analogWrite(RPWM1, abs(controlValue1));
-        analogWrite(LPWM1, 0);
-    } else if (ErrPos1 < 0) {
-        analogWrite(RPWM1, 0);
-        analogWrite(LPWM1, abs(controlValue1));
-    } else {
-        analogWrite(RPWM1, 0);
-        analogWrite(LPWM1, 0);
-    }
+    // Motor 1
+    if (ErrPos1 > 0)      { analogWrite(RPWM1, abs(controlValue1)); analogWrite(LPWM1, 0); }
+    else if (ErrPos1 < 0) { analogWrite(RPWM1, 0); analogWrite(LPWM1, abs(controlValue1)); }
+    else                  { analogWrite(RPWM1, 0); analogWrite(LPWM1, 0); }
 
-    if (ErrPos2 > 0) {
-        analogWrite(RPWM2, abs(controlValue2));
-        analogWrite(LPWM2, 0);
-    } else if (ErrPos2 < 0) {
-        analogWrite(RPWM2, 0);
-        analogWrite(LPWM2, abs(controlValue2));
-    } else {
-        analogWrite(RPWM2, 0);
-        analogWrite(LPWM2, 0);
-    }
+    // Motor 2
+    if (ErrPos2 > 0)      { analogWrite(RPWM2, abs(controlValue2)); analogWrite(LPWM2, 0); }
+    else if (ErrPos2 < 0) { analogWrite(RPWM2, 0); analogWrite(LPWM2, abs(controlValue2)); }
+    else                  { analogWrite(RPWM2, 0); analogWrite(LPWM2, 0); }
 
-    if (ErrPos3 > 0) {
-        analogWrite(RPWM3, abs(controlValue3));
-        analogWrite(LPWM3, 0);
-    } else if (ErrPos3 < 0) {
-        analogWrite(RPWM3, 0);
-        analogWrite(LPWM3, abs(controlValue3));
-    } else {
-        analogWrite(RPWM3, 0);
-        analogWrite(LPWM3, 0);
-    }
-}
-
-void stopAllMotors() {
-    analogWrite(RPWM1, 0); analogWrite(LPWM1, 0);
-    analogWrite(RPWM2, 0); analogWrite(LPWM2, 0);
-    analogWrite(RPWM3, 0); analogWrite(LPWM3, 0);
+    // Motor 3
+    if (ErrPos3 > 0)      { analogWrite(RPWM3, abs(controlValue3)); analogWrite(LPWM3, 0); }
+    else if (ErrPos3 < 0) { analogWrite(RPWM3, 0); analogWrite(LPWM3, abs(controlValue3)); }
+    else                  { analogWrite(RPWM3, 0); analogWrite(LPWM3, 0); }
 }
 
 void manualModeControl() {
-    int effectiveSpeed = MANUAL_SPEED;
-
-    if (ENABLE_ADAPTIVE_MANUAL) {
-        float loadScale = getLoadScaling();
-        effectiveSpeed = MANUAL_SPEED * loadScale;
-    }
+    int speed = ENABLE_ADAPTIVE_MANUAL ? (int)(MANUAL_SPEED * getLoadScaling()) : MANUAL_SPEED;
 
     if (manualCommand == 1) {
-        analogWrite(RPWM1, effectiveSpeed); analogWrite(LPWM1, 0);
-        analogWrite(RPWM2, effectiveSpeed); analogWrite(LPWM2, 0);
-        analogWrite(RPWM3, effectiveSpeed); analogWrite(LPWM3, 0);
+        analogWrite(RPWM1, speed); analogWrite(LPWM1, 0);
+        analogWrite(RPWM2, speed); analogWrite(LPWM2, 0);
+        analogWrite(RPWM3, speed); analogWrite(LPWM3, 0);
     } else if (manualCommand == 2) {
-        analogWrite(RPWM1, 0); analogWrite(LPWM1, effectiveSpeed);
-        analogWrite(RPWM2, 0); analogWrite(LPWM2, effectiveSpeed);
-        analogWrite(RPWM3, 0); analogWrite(LPWM3, effectiveSpeed);
+        analogWrite(RPWM1, 0); analogWrite(LPWM1, speed);
+        analogWrite(RPWM2, 0); analogWrite(LPWM2, speed);
+        analogWrite(RPWM3, 0); analogWrite(LPWM3, speed);
     } else {
         stopAllMotors();
     }
@@ -832,67 +616,60 @@ void manualModeControl() {
 //==================================================================
 // SETUP
 //==================================================================
-
 void setup() {
     Serial.begin(115200);
 
-    pinMode(RPWM1, OUTPUT);
-    pinMode(LPWM1, OUTPUT);
-    pinMode(RPWM2, OUTPUT);
-    pinMode(LPWM2, OUTPUT);
-    pinMode(RPWM3, OUTPUT);
-    pinMode(LPWM3, OUTPUT);
+    // Motor pins
+    pinMode(RPWM1, OUTPUT); pinMode(LPWM1, OUTPUT);
+    pinMode(RPWM2, OUTPUT); pinMode(LPWM2, OUTPUT);
+    pinMode(RPWM3, OUTPUT); pinMode(LPWM3, OUTPUT);
 
-    pinMode(ENC1, INPUT);
-    pinMode(ENC2, INPUT);
-    pinMode(ENC3, INPUT);
+    // Encoder pins
+    pinMode(ENC1, INPUT); pinMode(ENC2, INPUT); pinMode(ENC3, INPUT);
 
-    pinMode(CurrSen1, INPUT);
-    pinMode(CurrSen2, INPUT);
-    pinMode(CurrSen3, INPUT);
+    // Current sensor pins
+    pinMode(CurrSen1, INPUT); pinMode(CurrSen2, INPUT); pinMode(CurrSen3, INPUT);
 
+    // Load cell pins
     pinMode(LOADCELL_DOUT_PIN, INPUT);
     pinMode(LOADCELL_SCK_PIN, OUTPUT);
 
-    while (!Serial) {
-        ;
-    }
+    while (!Serial) { ; }
+
+    // Inisialisasi state
+    manipulatorState = 0;
+    operatingMode = 0;
+    dynamicThreshold1 = (float)threshold1;
+    dynamicThreshold2 = (float)threshold2;
 
     Serial.println("===========================================");
     Serial.println("  3-RPS Parallel Robot Control System");
-    Serial.println("  Admittance Control + Hill-Zajac Model");
-    Serial.println("  K dan B DINAMIS berdasarkan Load Cell");
+    Serial.println("  Admittance + Hill-Zajac Dynamic K & B");
     Serial.println("  Ref: Zajac (1989)");
     Serial.println("===========================================");
-    Serial.println("");
-    Serial.println("Hill-Zajac Parameters:");
-    Serial.print("  F_MAX    = "); Serial.print(F_MAX); Serial.println(" N");
-    Serial.print("  FL_SLOPE = "); Serial.println(FL_SLOPE);
-    Serial.print("  FV_SLOPE = "); Serial.println(FV_SLOPE);
-    Serial.print("  K_SCALE  = "); Serial.println(K_SCALE);
-    Serial.print("  B_SCALE  = "); Serial.println(B_SCALE);
-    Serial.print("  K_MIN    = "); Serial.print(K_MIN); Serial.println(" N/m");
-    Serial.print("  B_MIN    = "); Serial.print(B_MIN); Serial.println(" N.s/m");
-    Serial.println("===========================================");
-    Serial.println("");
+    Serial.print("  K range: "); Serial.print(K_MIN);
+    Serial.print(" ~ "); Serial.print(F_MAX * FV_ZERO * FL_SLOPE * K_SCALE, 1);
+    Serial.println(" N/m");
+    Serial.print("  B range: "); Serial.print(B_MIN);
+    Serial.print(" ~ "); Serial.print(F_MAX * FL_OPT * FV_SLOPE * B_SCALE, 1);
+    Serial.println(" N.s/m");
+    Serial.println("===========================================\n");
 }
 
 //==================================================================
 // MAIN LOOP
 //==================================================================
-
 void loop() {
     long currentTime = millis();
 
     //================================================================
     // SERIAL COMMAND PROCESSING
     //================================================================
-
     if (Serial.available() > 0) {
-        char receivedChar = Serial.read();
-        receivedData += receivedChar;
+        char c = Serial.read();
+        receivedData += c;
 
-        if (receivedChar == '\n') {
+        if (c == '\n') {
             receivedData.trim();
 
             if (receivedData.startsWith("S")) {
@@ -915,84 +692,54 @@ void loop() {
                 stopAllMotors();
                 Serial.println("ACK_RETREAT_COMPLETE");
             }
-            else if (receivedData.startsWith("X")) {
-                resetSystem();
-            }
-            else if (receivedData.startsWith("E")) {
-                emergencyStop();
-            }
+            else if (receivedData.startsWith("X")) { resetSystem(); }
+            else if (receivedData.startsWith("E")) { emergencyStop(); }
             else if (receivedData == "1") {
-                operatingMode = 0;
-                manualCommand = 1;
-                retreatHasBeenTriggered = false;
-                retreatRequestSent = false;
+                operatingMode = 0; manualCommand = 1;
+                retreatHasBeenTriggered = false; retreatRequestSent = false;
             }
             else if (receivedData == "2") {
-                operatingMode = 0;
-                manualCommand = 2;
-                retreatHasBeenTriggered = false;
-                retreatRequestSent = false;
+                operatingMode = 0; manualCommand = 2;
+                retreatHasBeenTriggered = false; retreatRequestSent = false;
             }
-            else if (receivedData == "0") {
-                operatingMode = 0;
-                manualCommand = 0;
-            }
+            else if (receivedData == "0") { operatingMode = 0; manualCommand = 0; }
             else if (receivedData.startsWith("K")) {
-                operatingMode = 0;
-                manualCommand = 0;
+                operatingMode = 0; manualCommand = 0;
                 parseOuterLoopGains(receivedData);
             }
             else if (receivedData.startsWith("P")) {
-                operatingMode = 0;
-                manualCommand = 0;
+                operatingMode = 0; manualCommand = 0;
                 parseInnerLoopGains(receivedData);
             }
             else if (receivedData.startsWith("T")) {
-                operatingMode = 0;
-                manualCommand = 0;
+                operatingMode = 0; manualCommand = 0;
                 parseThresholds(receivedData);
             }
             else if (receivedData == "ADMITTANCE_ON") {
                 admittanceEnabled = true;
-                Serial.println("Admittance Control ENABLED (Hill-Zajac Dynamic K & B)");
+                Serial.println("Admittance ON (Hill-Zajac Dynamic K & B)");
             }
             else if (receivedData == "ADMITTANCE_OFF") {
                 admittanceEnabled = false;
-                Serial.println("Admittance Control DISABLED");
+                Serial.println("Admittance OFF");
             }
             else if (receivedData == "ADMITTANCE_RESET") {
                 resetAdmittance();
-                Serial.println("Admittance states RESET (K & B kembali ke default)");
+                Serial.println("Admittance RESET");
             }
             else if (receivedData.startsWith("ADM") && receivedData.indexOf(',') > 0) {
                 parseAdmittanceParams(receivedData);
             }
             else if (receivedData == "ADMITTANCE_STATUS") {
-                Serial.println("\n=== Admittance Control Status (Hill-Zajac) ===");
-                Serial.print("Enabled: ");
-                Serial.println(admittanceEnabled ? "YES" : "NO");
-                Serial.println("\nHill-Zajac Muscle Model:");
-                Serial.print("  F_MAX    = "); Serial.print(F_MAX); Serial.println(" N");
-                Serial.print("  FL_SLOPE = "); Serial.println(FL_SLOPE);
-                Serial.print("  FV_SLOPE = "); Serial.println(FV_SLOPE);
-                Serial.print("  K_SCALE  = "); Serial.println(K_SCALE);
-                Serial.print("  B_SCALE  = "); Serial.println(B_SCALE);
-                Serial.println("\nNilai Saat Ini (DINAMIS):");
-                Serial.print("  Activation (a)   = "); Serial.print(currentActivation, 4);
-                Serial.print("  (a_inv = "); Serial.print(1.0 - currentActivation, 4); Serial.println(")");
-                Serial.print("  K_adm (stiffness)= "); Serial.print(currentK, 2); Serial.println(" N/m");
-                Serial.print("  B_adm (damping)  = "); Serial.print(currentB, 2); Serial.println(" N.s/m");
-                Serial.print("  M_adm (mass)     = "); Serial.print(M_adm); Serial.println(" kg (tetap)");
-                Serial.println("\nAdmittance States:");
-                Serial.print("  Z    = "); Serial.print(Z_adm * 1000, 4); Serial.println(" mm");
-                Serial.print("  Zdot = "); Serial.print(Zdot_adm * 1000, 4); Serial.println(" mm/s");
-                Serial.print("  F_ext= "); Serial.print(latestValidLoad, 2); Serial.println(" N");
-                Serial.println("\nRange K dan B:");
-                Serial.print("  K: "); Serial.print(K_MIN); Serial.print(" N/m (max load) ~ ");
-                Serial.print(F_MAX * FV_ZERO * FL_SLOPE * K_SCALE, 1); Serial.println(" N/m (no load)");
-                Serial.print("  B: "); Serial.print(B_MIN); Serial.print(" N.s/m (max load) ~ ");
-                Serial.print(F_MAX * FL_OPT * FV_SLOPE * B_SCALE, 1); Serial.println(" N.s/m (no load)");
-                Serial.println("==============================================\n");
+                Serial.println("\n=== Admittance Status (Hill-Zajac) ===");
+                Serial.print("Enabled   : "); Serial.println(admittanceEnabled ? "YES" : "NO");
+                Serial.print("Activation: "); Serial.println(currentActivation, 4);
+                Serial.print("K_adm     : "); Serial.print(currentK, 2); Serial.println(" N/m");
+                Serial.print("B_adm     : "); Serial.print(currentB, 2); Serial.println(" N.s/m");
+                Serial.print("M_adm     : "); Serial.print(M_adm); Serial.println(" kg");
+                Serial.print("Z_adm     : "); Serial.print(Z_adm * 1000, 4); Serial.println(" mm");
+                Serial.print("F_ext     : "); Serial.print(latestValidLoad, 2); Serial.println(" N");
+                Serial.println("======================================\n");
             }
 
             receivedData = "";
@@ -1000,103 +747,89 @@ void loop() {
     }
 
     //================================================================
-    // AUTO MODE EXECUTION (FORWARD OR RETREAT)
+    // AUTO MODE (FORWARD / RETREAT)
     //================================================================
-
     if (operatingMode == 1 || operatingMode == 2) {
 
-        // Load cell monitoring
+        //------------------------------------------------------------
+        // Load cell reading & manipulatorState update (forward only)
+        //------------------------------------------------------------
         if (operatingMode == 1 && currentTime - lastLoadTime >= loadCellInterval) {
+
             if (retreatHasBeenTriggered) {
                 manipulatorState = 1;
             } else {
-                long effectiveValue = readHX711() - loadCellOffset;
-                float rawLoad = effectiveValue / 10000.0;
+                long raw = readHX711() - loadCellOffset;
+                float load = raw / 10000.0;
+                load = constrain(load, 0.0, 100.0);
+                latestValidLoad = load;
 
-                if (rawLoad < 0.0) rawLoad = 0.0;
-                if (rawLoad > 100.0) rawLoad = 100.0;
+                float dt_load = loadCellInterval / 1000.0;
+                updateDynamicThresholds(latestValidLoad, dt_load);
 
-                latestValidLoad = rawLoad;
+                int roundLoad = round(latestValidLoad);
 
-                float dt = loadCellInterval / 1000.0;
-                updateDynamicThresholds(latestValidLoad, dt);
-
-                int roundValue = round(latestValidLoad);
-
-                if (roundValue >= dynamicThreshold2) {
+                if (roundLoad >= (int)dynamicThreshold2) {
                     manipulatorState = 1;
                     retreatHasBeenTriggered = true;
                     if (!retreatRequestSent) {
                         Serial.println("RETREAT");
                         retreatRequestSent = true;
                     }
-                } else if (roundValue >= dynamicThreshold1) {
+                } else if (roundLoad >= (int)dynamicThreshold1) {
                     manipulatorState = 1;
                 } else {
-                    manipulatorState = 0;
+                    manipulatorState = 0;  // ← RUNNING
                 }
             }
             lastLoadTime = currentTime;
         }
 
-        // ============================================================
-        // ADMITTANCE CONTROL UPDATE DENGAN HILL-ZAJAC DYNAMIC K & B
-        // Urutan eksekusi:
-        // 1. updateMuscleAdmittance() → hitung K dan B dari load cell
-        // 2. updateAdmittanceControl() → pakai K dan B baru
-        // ============================================================
+        //------------------------------------------------------------
+        // Admittance update: Hill-Zajac → K & B baru → Z_adm baru
+        //------------------------------------------------------------
         if (admittanceEnabled && operatingMode == 1 &&
             currentTime - lastAdmittanceTime >= admittanceUpdateInterval) {
 
-            float F_external = latestValidLoad;
-            float dt = admittanceUpdateInterval / 1000.0;
+            float F_ext = latestValidLoad;
+            float dt_adm = admittanceUpdateInterval / 1000.0;
 
-            // STEP 1: Update K dan B dinamis dari Hill-Zajac model
-            updateMuscleAdmittance(F_external);
+            // STEP 1: Update K dan B dari Hill-Zajac
+            updateMuscleAdmittance(F_ext);
 
-            // STEP 2: Hitung admittance displacement dengan K & B baru
-            updateAdmittanceControl(F_external, dt);
+            // STEP 2: Hitung Z_adm dengan K & B baru
+            updateAdmittanceControl(F_ext, dt_adm);
 
-            // Cek pause trajectory
-            if (F_external > FORCE_PAUSE_THRESHOLD && !trajectoryPaused) {
+            // Cek pause/resume trajectory
+            if (F_ext > FORCE_PAUSE_THRESHOLD && !trajectoryPaused) {
                 trajectoryPaused = true;
-                pausedRefPos1 = refPos1;
-                pausedRefPos2 = refPos2;
-                pausedRefPos3 = refPos3;
-                pausedRefVelo1 = refVelo1;
-                pausedRefVelo2 = refVelo2;
-                pausedRefVelo3 = refVelo3;
-                pausedRefFc1 = refFc1;
-                pausedRefFc2 = refFc2;
-                pausedRefFc3 = refFc3;
+                pausedRefPos1 = refPos1; pausedRefPos2 = refPos2; pausedRefPos3 = refPos3;
+                pausedRefVelo1 = refVelo1; pausedRefVelo2 = refVelo2; pausedRefVelo3 = refVelo3;
+                pausedRefFc1 = refFc1; pausedRefFc2 = refFc2; pausedRefFc3 = refFc3;
                 Serial.println("PAUSE_TRAJECTORY");
-            }
-            else if (F_external <= FORCE_PAUSE_THRESHOLD && trajectoryPaused) {
+            } else if (F_ext <= FORCE_PAUSE_THRESHOLD && trajectoryPaused) {
                 trajectoryPaused = false;
-                refPos1 = pausedRefPos1;
-                refPos2 = pausedRefPos2;
-                refPos3 = pausedRefPos3;
-                refVelo1 = 0.0;
-                refVelo2 = 0.0;
-                refVelo3 = 0.0;
-                refFc1 = pausedRefFc1;
-                refFc2 = pausedRefFc2;
-                refFc3 = pausedRefFc3;
+                refPos1 = pausedRefPos1; refPos2 = pausedRefPos2; refPos3 = pausedRefPos3;
+                refVelo1 = 0.0; refVelo2 = 0.0; refVelo3 = 0.0;
+                refFc1 = pausedRefFc1; refFc2 = pausedRefFc2; refFc3 = pausedRefFc3;
                 Serial.println("RESUME_TRAJECTORY");
             }
 
             lastAdmittanceTime = currentTime;
         }
 
-        // Encoder reading
+        //------------------------------------------------------------
+        // Encoder update
+        //------------------------------------------------------------
         if (currentTime - lastEncTime >= encoderInterval && manipulatorState != 1) {
             updateEncoders();
             lastEncTime = currentTime;
         }
 
-        // Control calculations
+        //------------------------------------------------------------
+        // Control calculation (hanya saat manipulatorState == 0)
+        //------------------------------------------------------------
         if (manipulatorState == 0) {
-
             if (currentTime - lastVeloTime >= veloInterval) {
                 updateVelocities();
                 lastVeloTime = currentTime;
@@ -1117,66 +850,39 @@ void loop() {
             }
         }
 
+        //------------------------------------------------------------
+        // Motor execution
+        //------------------------------------------------------------
         if (manipulatorState == 0) {
             applyMotorControl();
         } else {
             stopAllMotors();
         }
 
-        // ============================================================
-        // STATUS REPORTING (termasuk K dan B dinamis)
-        // ============================================================
+        //------------------------------------------------------------
+        // Status reporting
+        //------------------------------------------------------------
         if (currentTime - lastPrnTime >= loadCellInterval) {
-            String statusStr;
-            String modeStr;
+            String status = (manipulatorState == 0) ? "running" : "paused";
+            String mode   = (operatingMode == 1) ? "forward" : "retreat";
 
-            if (operatingMode == 1) modeStr = "forward";
-            else modeStr = "retreat";
+            Serial.print("status:"); Serial.print(status);
+            Serial.print(",mode:"); Serial.print(mode);
+            Serial.print(",load:"); Serial.print(latestValidLoad, 2);
+            Serial.print(",scale:"); Serial.print(getLoadScaling(), 2);
+            Serial.print(",thresh1:"); Serial.print(dynamicThreshold1, 2);
+            Serial.print(",thresh2:"); Serial.print(dynamicThreshold2, 2);
+            Serial.print(",rate:"); Serial.print(loadChangeRate, 2);
+            Serial.print(",pos:"); Serial.print(ActPos1, 2);
+            Serial.print(","); Serial.print(ActPos2, 2);
+            Serial.print(","); Serial.print(ActPos3, 2);
 
-            if (manipulatorState == 0) statusStr = "running";
-            else if (manipulatorState == 1) statusStr = "paused";
-            else statusStr = "retreating";
-
-            float currentScale = getLoadScaling();
-
-            Serial.print("status:");
-            Serial.print(statusStr);
-            Serial.print(",mode:");
-            Serial.print(modeStr);
-            Serial.print(",load:");
-            Serial.print(latestValidLoad, 2);
-            Serial.print(",scale:");
-            Serial.print(currentScale, 2);
-            Serial.print(",thresh1:");
-            Serial.print(dynamicThreshold1, 2);
-            Serial.print(",thresh2:");
-            Serial.print(dynamicThreshold2, 2);
-            Serial.print(",rate:");
-            Serial.print(loadChangeRate, 2);
-            Serial.print(",mag:");
-            Serial.print(loadChangeMagnitude, 2);
-            Serial.print(",pos:");
-            Serial.print(ActPos1, 2);
-            Serial.print(",");
-            Serial.print(ActPos2, 2);
-            Serial.print(",");
-            Serial.print(ActPos3, 2);
-
-            // Info admittance + Hill-Zajac dinamis
             if (admittanceEnabled && operatingMode == 1) {
-                Serial.print(",Z_adm:");
-                Serial.print(Z_adm * 1000, 3);        // mm
-                Serial.print(",Zdot:");
-                Serial.print(Zdot_adm * 1000, 3);     // mm/s
-                Serial.print(",traj_paused:");
-                Serial.print(trajectoryPaused ? "1" : "0");
-                // K dan B dinamis dari Hill-Zajac
-                Serial.print(",activation:");
-                Serial.print(currentActivation, 3);
-                Serial.print(",K_adm:");
-                Serial.print(currentK, 2);             // N/m dinamis
-                Serial.print(",B_adm:");
-                Serial.print(currentB, 2);             // N.s/m dinamis
+                Serial.print(",activation:"); Serial.print(currentActivation, 3);
+                Serial.print(",K_adm:"); Serial.print(currentK, 2);
+                Serial.print(",B_adm:"); Serial.print(currentB, 2);
+                Serial.print(",Z_adm:"); Serial.print(Z_adm * 1000, 3);
+                Serial.print(",traj_paused:"); Serial.print(trajectoryPaused ? "1" : "0");
             }
 
             Serial.println("");
@@ -1185,21 +891,16 @@ void loop() {
     }
 
     //================================================================
-    // MANUAL MODE EXECUTION
+    // MANUAL MODE
     //================================================================
-
     else {
-        if (currentTime - lastLoadTime >= loadCellInterval && ENABLE_ADAPTIVE_MANUAL) {
-            long effectiveValue = readHX711() - loadCellOffset;
-            float rawLoad = effectiveValue / 10000.0;
-
-            if (rawLoad < 0.0) rawLoad = 0.0;
-            if (rawLoad > 100.0) rawLoad = 100.0;
-
-            latestValidLoad = rawLoad;
+        if (ENABLE_ADAPTIVE_MANUAL && currentTime - lastLoadTime >= loadCellInterval) {
+            long raw = readHX711() - loadCellOffset;
+            float load = raw / 10000.0;
+            load = constrain(load, 0.0, 100.0);
+            latestValidLoad = load;
             lastLoadTime = currentTime;
         }
-
         manualModeControl();
     }
 }
