@@ -2,7 +2,8 @@
 // ARDUINO MOTOR CONTROL SYSTEM - ADMITTANCE CONTROL VERSION
 // Features:
 // - Admittance Control dengan K dan B DINAMIS (Hill-Zajac Muscle Model)
-// - Z(s) = F_ext / (M*s^2 + B(t)*s + K(t))
+// - M = 0: Z(s) = F_ext / (B(t)*s + K(t))  ← First-Order System
+// - Backward Euler integration untuk stabilitas
 // - K dan B berubah real-time berdasarkan load cell
 // - CTC with feedforward compensation
 // - Load-based adaptive scaling
@@ -30,17 +31,13 @@ int threshold2 = 40;
 long loadCellOffset = 0;
 float latestValidLoad = 0.0;
 
-// Dynamic Threshold Parameters
-float dynamicThreshold1 = 20.0;
-float dynamicThreshold2 = 40.0;
-float prevLoad = 0.0;
-float loadChangeRate = 0.0;
-float loadChangeMagnitude = 0.0;
-const float RATE_SENSITIVITY = 2.0;
-const float MAGNITUDE_SENSITIVITY = 0.5;
-const float MAX_THRESHOLD_MULTIPLIER = 3.0;
-const float MIN_THRESHOLD_MULTIPLIER = 0.3;
-const float RATE_SMOOTHING_ALPHA = 0.7;
+// ---------------------------------------------------------------
+// Dynamic Threshold Parameters (Removed for Admittance test)
+// [COMMENTED - tidak dihapus, bisa diaktifkan kembali jika perlu]
+// const float DYN_THRESH_ALPHA = 0.1;
+// float dynThreshold1 = 20.0;
+// float dynThreshold2 = 40.0;
+// ---------------------------------------------------------------
 
 // Adaptive Load Control Parameters
 const float LOAD_SCALE_MIN = 0.15;
@@ -73,13 +70,17 @@ const int admittanceUpdateInterval = 10;
 
 //==================================================================
 // ADMITTANCE CONTROL PARAMETERS
-// Transfer Function: Z(s) = F_ext / (M*s^2 + B(t)*s + K(t))
-// K dan B DINAMIS dari Hill-Zajac Muscle Model
+// M = 0 → First-Order System:
+//   Transfer Function: B(t)*Z' + K(t)*Z = F_ext
+//   Backward Euler:    Z[n+1] = (B*Z[n] + F_ext*dt) / (B + K*dt)
+//
+// [COMMENTED - Second-order (M != 0) tidak dihapus]
+// float M_adm = 101.7;   // Virtual mass (kg) - tidak digunakan saat M=0
 //==================================================================
 
-float M_adm = 101.7;   // Virtual mass (kg) - TETAP
-float B_adm = 500.0;   // Virtual damping (N.s/m) - DINAMIS
-float K_adm = 614.1;   // Virtual stiffness (N/m) - DINAMIS
+// float M_adm = 101.7;   // [COMMENTED] Virtual mass - M=0 sesuai permintaan dosen
+float B_adm = 500.0;       // Virtual damping (N.s/m) - DINAMIS dari Hill-Zajac
+float K_adm = 614.1;       // Virtual stiffness (N/m) - DINAMIS dari Hill-Zajac
 float admittanceGain = 1.0;
 
 //==================================================================
@@ -116,11 +117,23 @@ float pausedRefVelo1 = 0.0, pausedRefVelo2 = 0.0, pausedRefVelo3 = 0.0;
 float pausedRefFc1 = 0.0, pausedRefFc2 = 0.0, pausedRefFc3 = 0.0;
 
 // Admittance state variables
-float Z_adm = 0.0, Zdot_adm = 0.0, Zddot_adm = 0.0;
-float Z_adm_prev = 0.0, Zdot_adm_prev = 0.0;
+// [COMMENTED] Zddot_adm tidak digunakan saat M=0 (first-order system)
+// float Zddot_adm = 0.0;
+float Z_adm = 0.0;
+float Zdot_adm = 0.0;
+float Z_adm_prev = 0.0;
+float Zdot_adm_prev = 0.0;  // disimpan untuk monitoring/logging
 
 bool admittanceEnabled = true;
 float Z_offset = 0.0;
+
+// ---------------------------------------------------------------
+// Rate of Change variables
+// [COMMENTED - tidak dihapus, bisa diaktifkan kembali jika perlu]
+// float loadRateOfChange = 0.0;
+// float prevLoad = 0.0;
+// float loadROC_alpha = 0.1;
+// ---------------------------------------------------------------
 
 //==================================================================
 // PIN DEFINITIONS
@@ -211,79 +224,89 @@ void updateMuscleAdmittance(float F_external) {
 }
 
 //==================================================================
-// ADMITTANCE CONTROL
+// ADMITTANCE CONTROL - FIRST ORDER (M = 0)
+// Persamaan: B(t)*Z' + K(t)*Z = F_ext
+//
+// Backward Euler discretisasi:
+//   B*(Z[n+1] - Z[n])/dt = F_ext - K*Z[n+1]
+//   → Z[n+1] = (B*Z[n] + F_ext*dt) / (B + K*dt)
+//   → Zdot   = (Z[n+1] - Z[n]) / dt
+//
+// Keunggulan vs Forward Euler:
+//   - Unconditionally stable untuk sistem first-order
+//   - Aman saat K besar (stiff) atau dt relatif besar
+//
+// [COMMENTED] Second-order (M != 0) untuk referensi:
+// void updateAdmittanceControl_2ndOrder(float F_external, float dt) {
+//     float F_scaled = F_external * admittanceGain;
+//     Zddot_adm = (F_scaled - B_adm*Zdot_adm - K_adm*Z_adm) / M_adm;
+//     Zdot_adm  = Zdot_adm_prev + Zddot_adm * dt;
+//     Z_adm     = Z_adm_prev    + Zdot_adm  * dt;
+//     Z_adm_prev    = Z_adm;
+//     Zdot_adm_prev = Zdot_adm;
+// }
 //==================================================================
 void updateAdmittanceControl(float F_external, float dt) {
-    // M*Z'' + B(t)*Z' + K(t)*Z = F_ext
     float F_scaled = F_external * admittanceGain;
 
-    Zddot_adm = (F_scaled - B_adm * Zdot_adm - K_adm * Z_adm) / M_adm;
-    Zdot_adm  = Zdot_adm_prev + Zddot_adm * dt;
-    Z_adm     = Z_adm_prev + Zdot_adm * dt;
+    // Safety: hindari divide by zero
+    float denom = B_adm + K_adm * dt;
+    if (denom < 1e-6) denom = 1e-6;
 
-    Z_adm_prev  = Z_adm;
-    Zdot_adm_prev = Zdot_adm;
+    // Backward Euler: Z[n+1] = (B*Z[n] + F_ext*dt) / (B + K*dt)
+    float Z_new = (B_adm * Z_adm_prev + F_scaled * dt) / denom;
+
+    // Hitung Zdot dari finite difference (untuk CTC velocity compensation)
+    Zdot_adm = (Z_new - Z_adm_prev) / dt;
+
+    // Update state
+    Z_adm         = Z_new;
+    Z_adm_prev    = Z_new;
+    Zdot_adm_prev = Zdot_adm;  // disimpan untuk monitoring
+
+    // [COMMENTED] Zddot tidak dihitung, M=0
+    // Zddot_adm = (F_scaled - B_adm*Zdot_adm - K_adm*Z_adm) / M_adm;
 }
 
 void resetAdmittance() {
-    Z_adm = 0.0; Zdot_adm = 0.0; Zddot_adm = 0.0;
-    Z_adm_prev = 0.0; Zdot_adm_prev = 0.0;
-    Z_offset = 0.0;
+    Z_adm         = 0.0;
+    Zdot_adm      = 0.0;
+    // Zddot_adm  = 0.0;  // [COMMENTED] tidak digunakan saat M=0
+    Z_adm_prev    = 0.0;
+    Zdot_adm_prev = 0.0;
+    Z_offset      = 0.0;
     K_adm = 614.1; B_adm = 500.0;
     currentK = 614.1; currentB = 500.0;
     currentActivation = 0.0;
+    // M_adm tidak di-reset  [COMMENTED] - M=0, tidak digunakan
 }
 
 //==================================================================
 // LOAD-BASED ADAPTIVE FUNCTIONS
 //==================================================================
-void updateDynamicThresholds(float currentLoad, float dt) {
-    float currentRate = (dt > 0.0) ? (currentLoad - prevLoad) / dt : 0.0;
-
-    loadChangeRate = (RATE_SMOOTHING_ALPHA * currentRate) +
-                     ((1.0 - RATE_SMOOTHING_ALPHA) * loadChangeRate);
-    loadChangeMagnitude = abs(currentLoad - prevLoad);
-
-    float rateFactor      = 1.0 + (abs(loadChangeRate) * RATE_SENSITIVITY);
-    float magnitudeFactor = 1.0 + (loadChangeMagnitude * MAGNITUDE_SENSITIVITY);
-    float combinedFactor  = max(rateFactor, magnitudeFactor);
-    float multiplier      = constrain(1.0 / combinedFactor,
-                                      MIN_THRESHOLD_MULTIPLIER,
-                                      MAX_THRESHOLD_MULTIPLIER);
-
-    dynamicThreshold1 = threshold1 * multiplier;
-    dynamicThreshold2 = threshold2 * multiplier;
-
-    if (dynamicThreshold2 <= dynamicThreshold1) {
-        dynamicThreshold2 = dynamicThreshold1 + 5.0;
-    }
-
-    prevLoad = currentLoad;
-}
-
 float getLoadScaling() {
     smoothedLoad = (LOAD_ALPHA * latestValidLoad) +
                    ((1.0 - LOAD_ALPHA) * smoothedLoad);
 
-    if (smoothedLoad < dynamicThreshold1) {
+    if (smoothedLoad < (float)threshold1) {
         return LOAD_SCALE_MAX;
-    } else if (smoothedLoad >= dynamicThreshold2) {
+    } else if (smoothedLoad >= (float)threshold2) {
         return LOAD_SCALE_MIN;
     } else {
-        float ratio = (smoothedLoad - dynamicThreshold1) /
-                      (dynamicThreshold2 - dynamicThreshold1);
+        float ratio = (smoothedLoad - (float)threshold1) /
+                      (float)(threshold2 - threshold1);
         return LOAD_SCALE_MAX - (ratio * (LOAD_SCALE_MAX - LOAD_SCALE_MIN));
     }
 }
 
 float getAdaptiveKp(float baseKp) {
-    if (smoothedLoad < dynamicThreshold1) {
+    if (smoothedLoad < (float)threshold1) {
         return baseKp;
-    } else if (smoothedLoad >= dynamicThreshold2) {
+    } else if (smoothedLoad >= (float)threshold2) {
         return baseKp * (1.0 - KP_DAMPING_FACTOR);
     } else {
-        float ratio = (smoothedLoad - dynamicThreshold1) /
-                      (dynamicThreshold2 - dynamicThreshold1);
+        float ratio = (smoothedLoad - (float)threshold1) /
+                      (float)(threshold2 - threshold1);
         return baseKp * (1.0 - ratio * KP_DAMPING_FACTOR);
     }
 }
@@ -413,15 +436,18 @@ void parseAdmittanceParams(String data) {
     String param = data.substring(0, c);
     float val = data.substring(c + 1).toFloat();
 
-    if (param == "M") {
-        M_adm = val;
-        Serial.print("Virtual Mass M = "); Serial.println(M_adm);
-    } else if (param == "G") {
+    if (param == "G") {
         admittanceGain = val;
         Serial.print("Admittance Gain = "); Serial.println(admittanceGain);
+    } else if (param == "M") {
+        // [COMMENTED] M=0 sesuai permintaan dosen, parameter M diabaikan
+        // M_adm = val;
+        Serial.println("INFO: M = 0 (first-order mode), parameter M diabaikan");
+        Serial.println("      Tuning via: G (gain), K_SCALE, B_SCALE di kode");
     } else {
-        Serial.println("Parameter: M (mass), G (gain)");
-        Serial.println("K dan B dinamis dari Hill-Zajac, tuning via K_SCALE/B_SCALE di kode");
+        Serial.println("Parameter tersedia: G (admittance gain)");
+        Serial.println("K dan B dinamis dari Hill-Zajac → tuning via K_SCALE/B_SCALE");
+        Serial.println("INFO: M=0, sistem first-order (Backward Euler)");
     }
 }
 
@@ -430,8 +456,6 @@ void parseThresholds(String data) {
     int c = data.indexOf(',');
     threshold1 = data.substring(0, c).toInt();
     threshold2 = data.substring(c + 1).toInt();
-    dynamicThreshold1 = (float)threshold1;
-    dynamicThreshold2 = (float)threshold2;
     Serial.print("Thresholds: T1="); Serial.print(threshold1);
     Serial.print(", T2="); Serial.println(threshold2);
 }
@@ -459,6 +483,10 @@ void resetSystem() {
     smoothedLoad = 0.0;
     latestValidLoad = 0.0;
 
+    // [COMMENTED] Rate of change reset
+    // loadRateOfChange = 0.0;
+    // prevLoad = 0.0;
+
     position1 = 0; position2 = 0; position3 = 0;
     ActPos1 = 0.0; ActPos2 = 0.0; ActPos3 = 0.0;
     prevPos1 = 0.0; prevPos2 = 0.0; prevPos3 = 0.0;
@@ -466,12 +494,6 @@ void resetSystem() {
     error1 = 0.0; error2 = 0.0; error3 = 0.0;
     prevError1 = 0.0; prevError2 = 0.0; prevError3 = 0.0;
     ActVelo1 = 0.0; ActVelo2 = 0.0; ActVelo3 = 0.0;
-
-    prevLoad = 0.0;
-    loadChangeRate = 0.0;
-    loadChangeMagnitude = 0.0;
-    dynamicThreshold1 = (float)threshold1;
-    dynamicThreshold2 = (float)threshold2;
 
     resetAdmittance();
 
@@ -542,6 +564,7 @@ void calculateCTCWithAdmittance() {
     float rp2 = refPos2 - (Z_adm * 1000.0);
     float rp3 = refPos3 - (Z_adm * 1000.0);
 
+    // Kompensasi velocity dari Zdot (first-order: Zdot masih relevan)
     float rv1 = refVelo1 - Zdot_adm;
     float rv2 = refVelo2 - Zdot_adm;
     float rv3 = refVelo3 - Zdot_adm;
@@ -639,12 +662,11 @@ void setup() {
     // Inisialisasi state
     manipulatorState = 0;
     operatingMode = 0;
-    dynamicThreshold1 = (float)threshold1;
-    dynamicThreshold2 = (float)threshold2;
 
     Serial.println("===========================================");
     Serial.println("  3-RPS Parallel Robot Control System");
     Serial.println("  Admittance + Hill-Zajac Dynamic K & B");
+    Serial.println("  M = 0 | First-Order | Backward Euler");
     Serial.println("  Ref: Zajac (1989)");
     Serial.println("===========================================");
     Serial.print("  K range: "); Serial.print(K_MIN);
@@ -653,6 +675,7 @@ void setup() {
     Serial.print("  B range: "); Serial.print(B_MIN);
     Serial.print(" ~ "); Serial.print(F_MAX * FL_OPT * FV_SLOPE * B_SCALE, 1);
     Serial.println(" N.s/m");
+    Serial.println("  System order : 1st (M=0, Backward Euler)");
     Serial.println("===========================================\n");
 }
 
@@ -717,7 +740,7 @@ void loop() {
             }
             else if (receivedData == "ADMITTANCE_ON") {
                 admittanceEnabled = true;
-                Serial.println("Admittance ON (Hill-Zajac Dynamic K & B)");
+                Serial.println("Admittance ON (Hill-Zajac Dynamic K & B, M=0, Backward Euler)");
             }
             else if (receivedData == "ADMITTANCE_OFF") {
                 admittanceEnabled = false;
@@ -731,15 +754,18 @@ void loop() {
                 parseAdmittanceParams(receivedData);
             }
             else if (receivedData == "ADMITTANCE_STATUS") {
-                Serial.println("\n=== Admittance Status (Hill-Zajac) ===");
-                Serial.print("Enabled   : "); Serial.println(admittanceEnabled ? "YES" : "NO");
-                Serial.print("Activation: "); Serial.println(currentActivation, 4);
-                Serial.print("K_adm     : "); Serial.print(currentK, 2); Serial.println(" N/m");
-                Serial.print("B_adm     : "); Serial.print(currentB, 2); Serial.println(" N.s/m");
-                Serial.print("M_adm     : "); Serial.print(M_adm); Serial.println(" kg");
-                Serial.print("Z_adm     : "); Serial.print(Z_adm * 1000, 4); Serial.println(" mm");
-                Serial.print("F_ext     : "); Serial.print(latestValidLoad, 2); Serial.println(" N");
-                Serial.println("======================================\n");
+                Serial.println("\n=== Admittance Status (Hill-Zajac, M=0) ===");
+                Serial.print("Enabled     : "); Serial.println(admittanceEnabled ? "YES" : "NO");
+                Serial.print("Model       : First-order (Backward Euler)");
+                // Serial.print("M_adm    : "); Serial.println(M_adm);  // [COMMENTED] M=0
+                Serial.print("Activation  : "); Serial.println(currentActivation, 4);
+                Serial.print("K_adm       : "); Serial.print(currentK, 2); Serial.println(" N/m");
+                Serial.print("B_adm       : "); Serial.print(currentB, 2); Serial.println(" N.s/m");
+                Serial.print("tau (B/K)   : "); Serial.print(currentB / currentK, 4); Serial.println(" s");
+                Serial.print("Z_adm       : "); Serial.print(Z_adm * 1000, 4); Serial.println(" mm");
+                Serial.print("Zdot_adm    : "); Serial.print(Zdot_adm * 1000, 4); Serial.println(" mm/s");
+                Serial.print("F_ext       : "); Serial.print(latestValidLoad, 2); Serial.println(" N");
+                Serial.println("============================================\n");
             }
 
             receivedData = "";
@@ -764,19 +790,21 @@ void loop() {
                 load = constrain(load, 0.0, 100.0);
                 latestValidLoad = load;
 
-                float dt_load = loadCellInterval / 1000.0;
-                updateDynamicThresholds(latestValidLoad, dt_load);
+                // [COMMENTED] Rate of change calculation
+                // loadRateOfChange = loadROC_alpha * (load - prevLoad) / (loadCellInterval / 1000.0)
+                //                  + (1.0 - loadROC_alpha) * loadRateOfChange;
+                // prevLoad = load;
 
                 int roundLoad = round(latestValidLoad);
 
-                if (roundLoad >= (int)dynamicThreshold2) {
+                if (roundLoad >= threshold2) {
                     manipulatorState = 1;
                     retreatHasBeenTriggered = true;
                     if (!retreatRequestSent) {
                         Serial.println("RETREAT");
                         retreatRequestSent = true;
                     }
-                } else if (roundLoad >= (int)dynamicThreshold1) {
+                } else if (roundLoad >= threshold1) {
                     manipulatorState = 1;
                 } else {
                     manipulatorState = 0;  // ← RUNNING
@@ -786,18 +814,20 @@ void loop() {
         }
 
         //------------------------------------------------------------
-        // Admittance update: Hill-Zajac → K & B baru → Z_adm baru
+        // Admittance update:
+        //   STEP 1: Hill-Zajac → update K & B dinamis
+        //   STEP 2: Backward Euler → hitung Z_adm baru
         //------------------------------------------------------------
         if (admittanceEnabled && operatingMode == 1 &&
             currentTime - lastAdmittanceTime >= admittanceUpdateInterval) {
 
             float F_ext = latestValidLoad;
-            float dt_adm = admittanceUpdateInterval / 1000.0;
+            float dt_adm = admittanceUpdateInterval / 1000.0;  // 10ms → 0.01s
 
             // STEP 1: Update K dan B dari Hill-Zajac
             updateMuscleAdmittance(F_ext);
 
-            // STEP 2: Hitung Z_adm dengan K & B baru
+            // STEP 2: Hitung Z_adm dengan Backward Euler (M=0)
             updateAdmittanceControl(F_ext, dt_adm);
 
             // Cek pause/resume trajectory
@@ -870,9 +900,8 @@ void loop() {
             Serial.print(",mode:"); Serial.print(mode);
             Serial.print(",load:"); Serial.print(latestValidLoad, 2);
             Serial.print(",scale:"); Serial.print(getLoadScaling(), 2);
-            Serial.print(",thresh1:"); Serial.print(dynamicThreshold1, 2);
-            Serial.print(",thresh2:"); Serial.print(dynamicThreshold2, 2);
-            Serial.print(",rate:"); Serial.print(loadChangeRate, 2);
+            Serial.print(",thresh1:"); Serial.print(threshold1);
+            Serial.print(",thresh2:"); Serial.print(threshold2);
             Serial.print(",pos:"); Serial.print(ActPos1, 2);
             Serial.print(","); Serial.print(ActPos2, 2);
             Serial.print(","); Serial.print(ActPos3, 2);
@@ -881,7 +910,9 @@ void loop() {
                 Serial.print(",activation:"); Serial.print(currentActivation, 3);
                 Serial.print(",K_adm:"); Serial.print(currentK, 2);
                 Serial.print(",B_adm:"); Serial.print(currentB, 2);
+                Serial.print(",tau:"); Serial.print(currentB / currentK, 4);
                 Serial.print(",Z_adm:"); Serial.print(Z_adm * 1000, 3);
+                Serial.print(",Zdot_adm:"); Serial.print(Zdot_adm * 1000, 3);
                 Serial.print(",traj_paused:"); Serial.print(trajectoryPaused ? "1" : "0");
             }
 
