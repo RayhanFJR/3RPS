@@ -9,6 +9,7 @@
 // - Load-based adaptive scaling
 // - Trajectory-based retreat communication
 // - Manual/Auto modes with safety system
+// - Retreat trigger via gradient load cell (Central Difference)
 //
 // Referensi: Zajac, F.E. (1989). Muscle and tendon: properties, models,
 //            scaling, and application to biomechanics and motor control.
@@ -20,31 +21,45 @@
 //==================================================================
 
 // Motor Control Speed
-const int MANUAL_SPEED = 125;
+const int MANUAL_SPEED  = 125;
 const int RETREAT_SPEED = 150;
 
 // Load Cell Configuration
 const int LOADCELL_DOUT_PIN = 12;
-const int LOADCELL_SCK_PIN = 13;
-int threshold1 = 20;
-int threshold2 = 40;
-long loadCellOffset = 0;
-float latestValidLoad = 0.0;
+const int LOADCELL_SCK_PIN  = 13;
+long  loadCellOffset    = 0;
+float latestValidLoad   = 0.0;
 
 // ---------------------------------------------------------------
-// Dynamic Threshold Parameters (Removed for Admittance test)
-// [COMMENTED - tidak dihapus, bisa diaktifkan kembali jika perlu]
-// const float DYN_THRESH_ALPHA = 0.1;
-// float dynThreshold1 = 20.0;
-// float dynThreshold2 = 40.0;
+// Threshold 1 DIHAPUS → admittance yang handle softening
+// Threshold 2 DIGANTI ROC (lihat bagian ROC di bawah)
 // ---------------------------------------------------------------
+
+// ---------------------------------------------------------------
+// Rate of Change (ROC) via Central Difference — pengganti threshold2
+//
+//   gradient[n] = (F[n+1] - F[n-1]) / (2 * dt)
+//
+//   Karena real-time (F[n+1] belum ada saat sample n tiba),
+//   implementasi pakai 3-sample ring buffer:
+//     buf[0]=F[n-1], buf[1]=F[n], buf[2]=F[n+1]
+//   Gradient dihitung 1 sample terlambat (delay = 1 * dt = 100ms)
+//   menggunakan buf[0] dan buf[2] yang sudah lengkap.
+//
+//   ROC > THRESHOLD_ROC → trigger RETREAT
+// ---------------------------------------------------------------
+const float THRESHOLD_ROC = 30.0;    // N/s  → tuning di sini
+float loadRateOfChange    = 0.0;     // hasil central difference (N/s)
+float rocBuf[3]           = {0,0,0}; // ring buffer: [n-1, n, n+1]
+int   rocBufIdx           = 0;       // indeks sampel terbaru
+int   rocBufCount         = 0;       // jumlah sampel yang sudah masuk (max 3)
 
 // Adaptive Load Control Parameters
-const float LOAD_SCALE_MIN = 0.15;
-const float LOAD_SCALE_MAX = 1.0;
-const float KP_DAMPING_FACTOR = 0.6;
-const bool ENABLE_ADAPTIVE_MANUAL = true;
-float smoothedLoad = 0.0;
+const float LOAD_SCALE_MIN      = 0.15;
+const float LOAD_SCALE_MAX      = 1.0;
+const float KP_DAMPING_FACTOR   = 0.6;
+const bool  ENABLE_ADAPTIVE_MANUAL = true;
+float smoothedLoad  = 0.0;
 const float LOAD_ALPHA = 0.3;
 
 // Retreat Control Parameters
@@ -56,16 +71,16 @@ const float GR = 0.2786;
 const float kt = 0.0663;
 
 // Current Sensor Parameters
-const int adcMax = 1023;
-const int nSamples = 3;
-const float CalFac = 3.40;
+const int   adcMax   = 1023;
+const int   nSamples = 3;
+const float CalFac   = 3.40;
 
 // Timing Intervals (milliseconds)
-const int loadCellInterval = 100;
-const int encoderInterval = 1;
-const int veloInterval = 10000;
-const int CTCcalculationInterval = 100;
-const int PDcalculationInterval = 100;
+const int loadCellInterval        = 100;
+const int encoderInterval         = 1;
+const int veloInterval            = 10000;
+const int CTCcalculationInterval  = 100;
+const int PDcalculationInterval   = 100;
 const int admittanceUpdateInterval = 10;
 
 //==================================================================
@@ -79,8 +94,8 @@ const int admittanceUpdateInterval = 10;
 //==================================================================
 
 // float M_adm = 101.7;   // [COMMENTED] Virtual mass - M=0 sesuai permintaan dosen
-float B_adm = 500.0;       // Virtual damping (N.s/m) - DINAMIS dari Hill-Zajac
-float K_adm = 614.1;       // Virtual stiffness (N/m) - DINAMIS dari Hill-Zajac
+float B_adm         = 500.0;   // Virtual damping (N.s/m) - DINAMIS dari Hill-Zajac
+float K_adm         = 614.1;   // Virtual stiffness (N/m) - DINAMIS dari Hill-Zajac
 float admittanceGain = 1.0;
 
 //==================================================================
@@ -111,7 +126,7 @@ float currentB = 500.0;
 
 // Trajectory pause
 const float FORCE_PAUSE_THRESHOLD = 5.0;
-bool trajectoryPaused = false;
+bool  trajectoryPaused = false;
 float pausedRefPos1 = 0.0, pausedRefPos2 = 0.0, pausedRefPos3 = 0.0;
 float pausedRefVelo1 = 0.0, pausedRefVelo2 = 0.0, pausedRefVelo3 = 0.0;
 float pausedRefFc1 = 0.0, pausedRefFc2 = 0.0, pausedRefFc3 = 0.0;
@@ -119,21 +134,13 @@ float pausedRefFc1 = 0.0, pausedRefFc2 = 0.0, pausedRefFc3 = 0.0;
 // Admittance state variables
 // [COMMENTED] Zddot_adm tidak digunakan saat M=0 (first-order system)
 // float Zddot_adm = 0.0;
-float Z_adm = 0.0;
-float Zdot_adm = 0.0;
-float Z_adm_prev = 0.0;
+float Z_adm         = 0.0;
+float Zdot_adm      = 0.0;
+float Z_adm_prev    = 0.0;
 float Zdot_adm_prev = 0.0;  // disimpan untuk monitoring/logging
 
-bool admittanceEnabled = true;
+bool  admittanceEnabled = true;
 float Z_offset = 0.0;
-
-// ---------------------------------------------------------------
-// Rate of Change variables
-// [COMMENTED - tidak dihapus, bisa diaktifkan kembali jika perlu]
-// float loadRateOfChange = 0.0;
-// float prevLoad = 0.0;
-// float loadROC_alpha = 0.1;
-// ---------------------------------------------------------------
 
 //==================================================================
 // PIN DEFINITIONS
@@ -149,9 +156,9 @@ const int CurrSen1 = A0, CurrSen2 = A1, CurrSen3 = A2;
 // SYSTEM STATE VARIABLES
 //==================================================================
 
-int operatingMode = 0;
-int manualCommand = 0;
-int manipulatorState = 0;
+int  operatingMode  = 0;
+int  manualCommand  = 0;
+int  manipulatorState = 0;
 bool retreatHasBeenTriggered = false;
 String receivedData = "";
 
@@ -161,7 +168,7 @@ String receivedData = "";
 float kp1 = 110.0, kd1 = 0.1, kpc1 = 30.0, kdc1 = 0.1;
 float refPos1 = 0.0, refVelo1 = 0.0, refFc1 = 0.0, refCurrent1 = 0.0;
 float ActPos1 = 0.0, ActVelo1 = 0.0, ActCurrent1 = 0.0;
-int position1 = 0, prevState1 = 0;
+int   position1 = 0, prevState1 = 0;
 float controlValue1 = 0.0, ErrPos1 = 0.0, error1 = 0.0;
 float prevError1 = 0.0, prevPos1 = 0.0;
 
@@ -171,7 +178,7 @@ float prevError1 = 0.0, prevPos1 = 0.0;
 float kp2 = 142.0, kd2 = 0.6, kpc2 = 33.0, kdc2 = 0.1;
 float refPos2 = 0.0, refVelo2 = 0.0, refFc2 = 0.0, refCurrent2 = 0.0;
 float ActPos2 = 0.0, ActVelo2 = 0.0, ActCurrent2 = 0.0;
-int position2 = 0, prevState2 = 0;
+int   position2 = 0, prevState2 = 0;
 float controlValue2 = 0.0, ErrPos2 = 0.0, error2 = 0.0;
 float prevError2 = 0.0, prevPos2 = 0.0;
 
@@ -181,43 +188,35 @@ float prevError2 = 0.0, prevPos2 = 0.0;
 float kp3 = 150.0, kd3 = 0.3, kpc3 = 38.0, kdc3 = 0.1;
 float refPos3 = 0.0, refVelo3 = 0.0, refFc3 = 0.0, refCurrent3 = 0.0;
 float ActPos3 = 0.0, ActVelo3 = 0.0, ActCurrent3 = 0.0;
-int position3 = 0, prevState3 = 0;
+int   position3 = 0, prevState3 = 0;
 float controlValue3 = 0.0, ErrPos3 = 0.0, error3 = 0.0;
 float prevError3 = 0.0, prevPos3 = 0.0;
 
 //==================================================================
 // TIMING VARIABLES
 //==================================================================
-long lastLoadTime = 0;
-long lastEncTime = 0;
-long lastVeloTime = 0;
-long lastCTCCalcTime = 0;
-long lastPDCalcTime = 0;
-long lastPrnTime = 0;
-long lastAdmittanceTime = 0;
+long lastLoadTime        = 0;
+long lastEncTime         = 0;
+long lastVeloTime        = 0;
+long lastCTCCalcTime     = 0;
+long lastPDCalcTime      = 0;
+long lastPrnTime         = 0;
+long lastAdmittanceTime  = 0;
 
 //==================================================================
 // HILL-ZAJAC MUSCLE MODEL
 // Hitung K dan B dinamis berdasarkan gaya eksternal
 //==================================================================
 void updateMuscleAdmittance(float F_external) {
-    // Normalisasi gaya → activation (0.0 - 1.0)
-    float a = constrain(F_external / LOAD_MAX, 0.0, 1.0);
-
-    // Invers: gaya besar → a_inv kecil → K & B kecil (compliant)
+    float a     = constrain(F_external / LOAD_MAX, 0.0, 1.0);
     float a_inv = 1.0 - a;
 
-    // K = a_inv * F_MAX * fv(0) * |fl'(l0)|
     float K_muscle = a_inv * F_MAX * FV_ZERO * FL_SLOPE;
+    float B_muscle = a_inv * F_MAX * FL_OPT  * FV_SLOPE;
 
-    // B = a_inv * F_MAX * fl(l0) * |fv'(0)|
-    float B_muscle = a_inv * F_MAX * FL_OPT * FV_SLOPE;
-
-    // Scale dan terapkan batas minimum
     K_adm = max(K_muscle * K_SCALE, K_MIN);
     B_adm = max(B_muscle * B_SCALE, B_MIN);
 
-    // Simpan untuk monitoring
     currentActivation = a;
     currentK = K_adm;
     currentB = B_adm;
@@ -227,16 +226,11 @@ void updateMuscleAdmittance(float F_external) {
 // ADMITTANCE CONTROL - FIRST ORDER (M = 0)
 // Persamaan: B(t)*Z' + K(t)*Z = F_ext
 //
-// Backward Euler discretisasi:
-//   B*(Z[n+1] - Z[n])/dt = F_ext - K*Z[n+1]
-//   → Z[n+1] = (B*Z[n] + F_ext*dt) / (B + K*dt)
-//   → Zdot   = (Z[n+1] - Z[n]) / dt
+// Backward Euler:
+//   Z[n+1] = (B*Z[n] + F_ext*dt) / (B + K*dt)
+//   Zdot   = (Z[n+1] - Z[n]) / dt
 //
-// Keunggulan vs Forward Euler:
-//   - Unconditionally stable untuk sistem first-order
-//   - Aman saat K besar (stiff) atau dt relatif besar
-//
-// [COMMENTED] Second-order (M != 0) untuk referensi:
+// [COMMENTED] Second-order untuk referensi:
 // void updateAdmittanceControl_2ndOrder(float F_external, float dt) {
 //     float F_scaled = F_external * admittanceGain;
 //     Zddot_adm = (F_scaled - B_adm*Zdot_adm - K_adm*Z_adm) / M_adm;
@@ -249,66 +243,80 @@ void updateMuscleAdmittance(float F_external) {
 void updateAdmittanceControl(float F_external, float dt) {
     float F_scaled = F_external * admittanceGain;
 
-    // Safety: hindari divide by zero
     float denom = B_adm + K_adm * dt;
     if (denom < 1e-6) denom = 1e-6;
 
-    // Backward Euler: Z[n+1] = (B*Z[n] + F_ext*dt) / (B + K*dt)
-    float Z_new = (B_adm * Z_adm_prev + F_scaled * dt) / denom;
+    float Z_new  = (B_adm * Z_adm_prev + F_scaled * dt) / denom;
+    Zdot_adm     = (Z_new - Z_adm_prev) / dt;
 
-    // Hitung Zdot dari finite difference (untuk CTC velocity compensation)
-    Zdot_adm = (Z_new - Z_adm_prev) / dt;
-
-    // Update state
     Z_adm         = Z_new;
     Z_adm_prev    = Z_new;
-    Zdot_adm_prev = Zdot_adm;  // disimpan untuk monitoring
-
-    // [COMMENTED] Zddot tidak dihitung, M=0
-    // Zddot_adm = (F_scaled - B_adm*Zdot_adm - K_adm*Z_adm) / M_adm;
+    Zdot_adm_prev = Zdot_adm;
 }
 
 void resetAdmittance() {
     Z_adm         = 0.0;
     Zdot_adm      = 0.0;
-    // Zddot_adm  = 0.0;  // [COMMENTED] tidak digunakan saat M=0
     Z_adm_prev    = 0.0;
     Zdot_adm_prev = 0.0;
     Z_offset      = 0.0;
-    K_adm = 614.1; B_adm = 500.0;
+    K_adm = 614.1;  B_adm = 500.0;
     currentK = 614.1; currentB = 500.0;
     currentActivation = 0.0;
-    // M_adm tidak di-reset  [COMMENTED] - M=0, tidak digunakan
+}
+
+//==================================================================
+// ROC via CENTRAL DIFFERENCE — pengganti threshold2
+//
+//   gradient[n] = (F[n+1] - F[n-1]) / (2 * dt)
+//
+//   Implementasi real-time dengan ring buffer 3 elemen:
+//     - Setiap sample masuk, geser buffer: [n-1] ← [n] ← [n+1]
+//     - Gradient dihitung dari elemen terlama (n-1) dan terbaru (n+1)
+//     - Delay efektif = 1 sample = 100ms (dapat diterima untuk safety)
+//
+//   Dipanggil setiap loadCellInterval (100ms) → dt = 0.1 s
+//==================================================================
+void updateLoadROC(float currentLoad) {
+    const float dt_roc = loadCellInterval / 1000.0;   // 0.1 s
+
+    // Geser ring buffer: indeks melingkar 0→1→2→0→...
+    rocBuf[rocBufIdx] = currentLoad;
+    rocBufIdx = (rocBufIdx + 1) % 3;
+    if (rocBufCount < 3) rocBufCount++;
+
+    // Butuh minimal 3 sampel sebelum central diff valid
+    if (rocBufCount < 3) {
+        loadRateOfChange = 0.0;
+        return;
+    }
+
+    // rocBufIdx sekarang menunjuk ke slot terlama (F[n-1]) setelah geser
+    // slot berikutnya = F[n], slot setelah itu = F[n+1]
+    float F_prev = rocBuf[rocBufIdx];                  // F[n-1] (terlama)
+    float F_next = rocBuf[(rocBufIdx + 2) % 3];        // F[n+1] (terbaru)
+
+    // Central difference: gradient = (F[n+1] - F[n-1]) / (2 * dt)
+    loadRateOfChange = (F_next - F_prev) / (2.0 * dt_roc);
 }
 
 //==================================================================
 // LOAD-BASED ADAPTIVE FUNCTIONS
+// (smoothedLoad masih dipakai untuk adaptive Kp dan manual scaling)
 //==================================================================
 float getLoadScaling() {
     smoothedLoad = (LOAD_ALPHA * latestValidLoad) +
                    ((1.0 - LOAD_ALPHA) * smoothedLoad);
 
-    if (smoothedLoad < (float)threshold1) {
-        return LOAD_SCALE_MAX;
-    } else if (smoothedLoad >= (float)threshold2) {
-        return LOAD_SCALE_MIN;
-    } else {
-        float ratio = (smoothedLoad - (float)threshold1) /
-                      (float)(threshold2 - threshold1);
-        return LOAD_SCALE_MAX - (ratio * (LOAD_SCALE_MAX - LOAD_SCALE_MIN));
-    }
+    // Tanpa threshold1 → gunakan nilai load absolut langsung
+    // Scaling linier: load 0 → skala 1.0,  load >= LOAD_MAX → skala LOAD_SCALE_MIN
+    float ratio = constrain(smoothedLoad / LOAD_MAX, 0.0, 1.0);
+    return LOAD_SCALE_MAX - ratio * (LOAD_SCALE_MAX - LOAD_SCALE_MIN);
 }
 
 float getAdaptiveKp(float baseKp) {
-    if (smoothedLoad < (float)threshold1) {
-        return baseKp;
-    } else if (smoothedLoad >= (float)threshold2) {
-        return baseKp * (1.0 - KP_DAMPING_FACTOR);
-    } else {
-        float ratio = (smoothedLoad - (float)threshold1) /
-                      (float)(threshold2 - threshold1);
-        return baseKp * (1.0 - ratio * KP_DAMPING_FACTOR);
-    }
+    float ratio = constrain(smoothedLoad / LOAD_MAX, 0.0, 1.0);
+    return baseKp * (1.0 - ratio * KP_DAMPING_FACTOR);
 }
 
 //==================================================================
@@ -377,7 +385,6 @@ void parseTrajectoryCommand(String data, bool isRetreat) {
     data.replace("S", "");
     data.replace("R", "");
 
-    // Parse 9 nilai: pos1,pos2,pos3,velo1,velo2,velo3,fc1,fc2,fc3
     float vals[9];
     int idx = 0;
     for (int i = 0; i < 8; i++) {
@@ -388,7 +395,6 @@ void parseTrajectoryCommand(String data, bool isRetreat) {
     }
     vals[idx] = data.toFloat();
 
-    // Jangan update kalau trajectory sedang paused
     if (trajectoryPaused) return;
 
     refPos1 = vals[0]; refPos2 = vals[1]; refPos3 = vals[2];
@@ -440,8 +446,6 @@ void parseAdmittanceParams(String data) {
         admittanceGain = val;
         Serial.print("Admittance Gain = "); Serial.println(admittanceGain);
     } else if (param == "M") {
-        // [COMMENTED] M=0 sesuai permintaan dosen, parameter M diabaikan
-        // M_adm = val;
         Serial.println("INFO: M = 0 (first-order mode), parameter M diabaikan");
         Serial.println("      Tuning via: G (gain), K_SCALE, B_SCALE di kode");
     } else {
@@ -451,14 +455,11 @@ void parseAdmittanceParams(String data) {
     }
 }
 
-void parseThresholds(String data) {
-    data.replace("T", "");
-    int c = data.indexOf(',');
-    threshold1 = data.substring(0, c).toInt();
-    threshold2 = data.substring(c + 1).toInt();
-    Serial.print("Thresholds: T1="); Serial.print(threshold1);
-    Serial.print(", T2="); Serial.println(threshold2);
-}
+// ---------------------------------------------------------------
+// parseThresholds DIHAPUS karena threshold1 & threshold2 tidak
+// digunakan lagi. Gradient dikonfigurasi via konstanta THRESHOLD_ROC
+// di bagian atas kode.
+// ---------------------------------------------------------------
 
 //==================================================================
 // SYSTEM CONTROL
@@ -470,8 +471,8 @@ void stopAllMotors() {
 }
 
 void resetSystem() {
-    operatingMode = 0;
-    manualCommand = 0;
+    operatingMode  = 0;
+    manualCommand  = 0;
     manipulatorState = 0;
     retreatHasBeenTriggered = false;
     retreatRequestSent = false;
@@ -480,12 +481,14 @@ void resetSystem() {
     stopAllMotors();
 
     loadCellOffset = readHX711();
-    smoothedLoad = 0.0;
+    smoothedLoad   = 0.0;
     latestValidLoad = 0.0;
 
-    // [COMMENTED] Rate of change reset
-    // loadRateOfChange = 0.0;
-    // prevLoad = 0.0;
+    // Reset ROC state (central difference buffer)
+    loadRateOfChange = 0.0;
+    rocBuf[0] = 0.0; rocBuf[1] = 0.0; rocBuf[2] = 0.0;
+    rocBufIdx   = 0;
+    rocBufCount = 0;
 
     position1 = 0; position2 = 0; position3 = 0;
     ActPos1 = 0.0; ActPos2 = 0.0; ActPos3 = 0.0;
@@ -558,13 +561,10 @@ void calculateCTC() {
 }
 
 void calculateCTCWithAdmittance() {
-    // Modifikasi refPos berdasarkan displacement admittance
-    // Z_adm dalam meter, refPos dalam mm → kali 1000
     float rp1 = refPos1 - (Z_adm * 1000.0);
     float rp2 = refPos2 - (Z_adm * 1000.0);
     float rp3 = refPos3 - (Z_adm * 1000.0);
 
-    // Kompensasi velocity dari Zdot (first-order: Zdot masih relevan)
     float rv1 = refVelo1 - Zdot_adm;
     float rv2 = refVelo2 - Zdot_adm;
     float rv3 = refVelo3 - Zdot_adm;
@@ -604,17 +604,14 @@ void calculatePD() {
 }
 
 void applyMotorControl() {
-    // Motor 1
     if (ErrPos1 > 0)      { analogWrite(RPWM1, abs(controlValue1)); analogWrite(LPWM1, 0); }
     else if (ErrPos1 < 0) { analogWrite(RPWM1, 0); analogWrite(LPWM1, abs(controlValue1)); }
     else                  { analogWrite(RPWM1, 0); analogWrite(LPWM1, 0); }
 
-    // Motor 2
     if (ErrPos2 > 0)      { analogWrite(RPWM2, abs(controlValue2)); analogWrite(LPWM2, 0); }
     else if (ErrPos2 < 0) { analogWrite(RPWM2, 0); analogWrite(LPWM2, abs(controlValue2)); }
     else                  { analogWrite(RPWM2, 0); analogWrite(LPWM2, 0); }
 
-    // Motor 3
     if (ErrPos3 > 0)      { analogWrite(RPWM3, abs(controlValue3)); analogWrite(LPWM3, 0); }
     else if (ErrPos3 < 0) { analogWrite(RPWM3, 0); analogWrite(LPWM3, abs(controlValue3)); }
     else                  { analogWrite(RPWM3, 0); analogWrite(LPWM3, 0); }
@@ -642,31 +639,27 @@ void manualModeControl() {
 void setup() {
     Serial.begin(115200);
 
-    // Motor pins
     pinMode(RPWM1, OUTPUT); pinMode(LPWM1, OUTPUT);
     pinMode(RPWM2, OUTPUT); pinMode(LPWM2, OUTPUT);
     pinMode(RPWM3, OUTPUT); pinMode(LPWM3, OUTPUT);
 
-    // Encoder pins
     pinMode(ENC1, INPUT); pinMode(ENC2, INPUT); pinMode(ENC3, INPUT);
 
-    // Current sensor pins
     pinMode(CurrSen1, INPUT); pinMode(CurrSen2, INPUT); pinMode(CurrSen3, INPUT);
 
-    // Load cell pins
     pinMode(LOADCELL_DOUT_PIN, INPUT);
     pinMode(LOADCELL_SCK_PIN, OUTPUT);
 
     while (!Serial) { ; }
 
-    // Inisialisasi state
     manipulatorState = 0;
-    operatingMode = 0;
+    operatingMode    = 0;
 
     Serial.println("===========================================");
     Serial.println("  3-RPS Parallel Robot Control System");
     Serial.println("  Admittance + Hill-Zajac Dynamic K & B");
     Serial.println("  M = 0 | First-Order | Backward Euler");
+    Serial.println("  Retreat trigger: Central Difference gradient");
     Serial.println("  Ref: Zajac (1989)");
     Serial.println("===========================================");
     Serial.print("  K range: "); Serial.print(K_MIN);
@@ -675,7 +668,9 @@ void setup() {
     Serial.print("  B range: "); Serial.print(B_MIN);
     Serial.print(" ~ "); Serial.print(F_MAX * FL_OPT * FV_SLOPE * B_SCALE, 1);
     Serial.println(" N.s/m");
-    Serial.println("  System order : 1st (M=0, Backward Euler)");
+    Serial.print("  Gradient thresh : "); Serial.print(THRESHOLD_ROC, 1); Serial.println(" N/s");
+    Serial.println("  Gradient method : (F[n+1]-F[n-1])/(2*dt), delay=1 sample (100ms)");
+    Serial.println("  System order    : 1st (M=0, Backward Euler)");
     Serial.println("===========================================\n");
 }
 
@@ -734,10 +729,11 @@ void loop() {
                 operatingMode = 0; manualCommand = 0;
                 parseInnerLoopGains(receivedData);
             }
-            else if (receivedData.startsWith("T")) {
-                operatingMode = 0; manualCommand = 0;
-                parseThresholds(receivedData);
-            }
+            // -------------------------------------------------------
+            // Command "T" (threshold) DIHAPUS karena threshold1 &
+            // threshold2 sudah tidak digunakan.
+            // Tuning gradient → edit THRESHOLD_ROC di kode.
+            // -------------------------------------------------------
             else if (receivedData == "ADMITTANCE_ON") {
                 admittanceEnabled = true;
                 Serial.println("Admittance ON (Hill-Zajac Dynamic K & B, M=0, Backward Euler)");
@@ -756,8 +752,7 @@ void loop() {
             else if (receivedData == "ADMITTANCE_STATUS") {
                 Serial.println("\n=== Admittance Status (Hill-Zajac, M=0) ===");
                 Serial.print("Enabled     : "); Serial.println(admittanceEnabled ? "YES" : "NO");
-                Serial.print("Model       : First-order (Backward Euler)");
-                // Serial.print("M_adm    : "); Serial.println(M_adm);  // [COMMENTED] M=0
+                Serial.println("Model       : First-order (Backward Euler)");
                 Serial.print("Activation  : "); Serial.println(currentActivation, 4);
                 Serial.print("K_adm       : "); Serial.print(currentK, 2); Serial.println(" N/m");
                 Serial.print("B_adm       : "); Serial.print(currentB, 2); Serial.println(" N.s/m");
@@ -765,6 +760,9 @@ void loop() {
                 Serial.print("Z_adm       : "); Serial.print(Z_adm * 1000, 4); Serial.println(" mm");
                 Serial.print("Zdot_adm    : "); Serial.print(Zdot_adm * 1000, 4); Serial.println(" mm/s");
                 Serial.print("F_ext       : "); Serial.print(latestValidLoad, 2); Serial.println(" N");
+                Serial.print("Gradient     : "); Serial.print(loadRateOfChange, 2); Serial.println(" N/s");
+                Serial.print("Grad thresh  : "); Serial.print(THRESHOLD_ROC, 1); Serial.println(" N/s");
+                Serial.println("Method       : Central difference (F[n+1]-F[n-1])/(2*dt)");
                 Serial.println("============================================\n");
             }
 
@@ -778,34 +776,30 @@ void loop() {
     if (operatingMode == 1 || operatingMode == 2) {
 
         //------------------------------------------------------------
-        // Load cell reading & manipulatorState update (forward only)
+        // Load cell reading + ROC calculation (forward only)
         //------------------------------------------------------------
         if (operatingMode == 1 && currentTime - lastLoadTime >= loadCellInterval) {
 
             if (retreatHasBeenTriggered) {
                 manipulatorState = 1;
             } else {
-                long raw = readHX711() - loadCellOffset;
-                float load = raw / 10000.0;
-                load = constrain(load, 0.0, 100.0);
+                long  raw  = readHX711() - loadCellOffset;
+                float load = constrain(raw / 10000.0, 0.0, 100.0);
                 latestValidLoad = load;
 
-                // [COMMENTED] Rate of change calculation
-                // loadRateOfChange = loadROC_alpha * (load - prevLoad) / (loadCellInterval / 1000.0)
-                //                  + (1.0 - loadROC_alpha) * loadRateOfChange;
-                // prevLoad = load;
+                // Hitung ROC (EMA-smoothed dF/dt)
+                updateLoadROC(load);
 
-                int roundLoad = round(latestValidLoad);
-
-                if (roundLoad >= threshold2) {
+                // Retreat trigger: ROC melebihi threshold
+                if (loadRateOfChange > THRESHOLD_ROC) {
                     manipulatorState = 1;
                     retreatHasBeenTriggered = true;
                     if (!retreatRequestSent) {
-                        Serial.println("RETREAT");
+                        Serial.print("RETREAT (gradient=");
+                        Serial.print(loadRateOfChange, 2);
+                        Serial.println(" N/s)");
                         retreatRequestSent = true;
                     }
-                } else if (roundLoad >= threshold1) {
-                    manipulatorState = 1;
                 } else {
                     manipulatorState = 0;  // ← RUNNING
                 }
@@ -814,23 +808,17 @@ void loop() {
         }
 
         //------------------------------------------------------------
-        // Admittance update:
-        //   STEP 1: Hill-Zajac → update K & B dinamis
-        //   STEP 2: Backward Euler → hitung Z_adm baru
+        // Admittance update (Hill-Zajac → Backward Euler)
         //------------------------------------------------------------
         if (admittanceEnabled && operatingMode == 1 &&
             currentTime - lastAdmittanceTime >= admittanceUpdateInterval) {
 
-            float F_ext = latestValidLoad;
-            float dt_adm = admittanceUpdateInterval / 1000.0;  // 10ms → 0.01s
+            float F_ext   = latestValidLoad;
+            float dt_adm  = admittanceUpdateInterval / 1000.0;
 
-            // STEP 1: Update K dan B dari Hill-Zajac
             updateMuscleAdmittance(F_ext);
-
-            // STEP 2: Hitung Z_adm dengan Backward Euler (M=0)
             updateAdmittanceControl(F_ext, dt_adm);
 
-            // Cek pause/resume trajectory
             if (F_ext > FORCE_PAUSE_THRESHOLD && !trajectoryPaused) {
                 trajectoryPaused = true;
                 pausedRefPos1 = refPos1; pausedRefPos2 = refPos2; pausedRefPos3 = refPos3;
@@ -899,9 +887,9 @@ void loop() {
             Serial.print("status:"); Serial.print(status);
             Serial.print(",mode:"); Serial.print(mode);
             Serial.print(",load:"); Serial.print(latestValidLoad, 2);
+            Serial.print(",gradient:"); Serial.print(loadRateOfChange, 2);
+            Serial.print(",grad_thresh:"); Serial.print(THRESHOLD_ROC, 1);
             Serial.print(",scale:"); Serial.print(getLoadScaling(), 2);
-            Serial.print(",thresh1:"); Serial.print(threshold1);
-            Serial.print(",thresh2:"); Serial.print(threshold2);
             Serial.print(",pos:"); Serial.print(ActPos1, 2);
             Serial.print(","); Serial.print(ActPos2, 2);
             Serial.print(","); Serial.print(ActPos3, 2);
@@ -926,10 +914,10 @@ void loop() {
     //================================================================
     else {
         if (ENABLE_ADAPTIVE_MANUAL && currentTime - lastLoadTime >= loadCellInterval) {
-            long raw = readHX711() - loadCellOffset;
-            float load = raw / 10000.0;
-            load = constrain(load, 0.0, 100.0);
+            long  raw  = readHX711() - loadCellOffset;
+            float load = constrain(raw / 10000.0, 0.0, 100.0);
             latestValidLoad = load;
+            updateLoadROC(load);  // ROC tetap di-update di manual mode
             lastLoadTime = currentTime;
         }
         manualModeControl();
