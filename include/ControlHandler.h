@@ -4,6 +4,9 @@
 #include <modbus/modbus.h>
 #include <boost/asio.hpp>
 #include <chrono>
+#include <fstream>
+#include <string>
+#include <iomanip>
 #include "StateMachine.h"
 #include "ModbusHandler.h"
 #include "TrajectoryManager.h"
@@ -80,6 +83,10 @@ private:
     void sendControllerData(int t);
     void sendRetreatData(int index);
     int clampRetreatIndex(int controllerSteps) const;
+    
+    // Data Logging
+    void initLogger();
+    std::ofstream logFile;
 };
 
 #endif // CONTROLHANDLER_H

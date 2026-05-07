@@ -1,115 +1,131 @@
-//==================================================================
-// ARDUINO MOTOR CONTROL SYSTEM - ADMITTANCE CONTROL VERSION
-// Features:
-// - Admittance Control dengan K dan B DINAMIS (Hill-Zajac Muscle Model)
-// - M = 0: Z(s) = F_ext / (B(t)*s + K(t))  ← First-Order System
-// - Backward Euler integration untuk stabilitas
-// - K dan B dinamis murni dari Hill-Zajac (tidak diubah yank)
-// - Retreat trigger: |yank| > THRESHOLD_YANK
-//     yank = (F_k - F_{k-1}) / Ts  ← backward difference (simpel)
-//     menggantikan central difference + ring buffer 3 elemen
-// - CTC with feedforward compensation
-// - Load-based adaptive scaling
-// - Trajectory-based retreat communication
-// - Manual/Auto modes with safety system
-//
-// Perubahan dari versi sebelumnya:
-//   ✗ rocBuf[3], rocBufIdx, rocBufCount, updateLoadROC()  → DIHAPUS
-//   ✓ yank = (F_k - F_{k-1}) / Ts                        → BARU
-//     hanya 1 variabel state tambahan (F_prev)
-//     tidak ada delay, tidak ada ring buffer
-//
-// Referensi:
-//   Zajac (1989) – Hill-Zajac muscle model (K & B dinamis)
-//   Reference 2  – Backward difference yank untuk trigger
-//==================================================================
+/*
+ * ============================================================
+ *  3-RPS PARALLEL ROBOT — ADMITTANCE CONTROL SYSTEM
+ * ============================================================
+ *  Model   : Hill-Zajac Muscle Model (Zajac 1989)
+ *  Control : Admittance (M=0, First-Order) + CTC + PD
+ *  Integrator : Backward Euler
+ *
+ *  K & B dinamis dari Hill-Zajac:
+ *    K = (1-a) * F_MAX * fv(0) * |fl'(l0)|
+ *    B = (1-a) * F_MAX * fl(l0) * |fv'(0)|
+ *
+ *  Retreat trigger:
+ *    yank = (F_k - F_{k-1}) / Ts   [backward difference]
+ *    |yank| > THRESHOLD_YANK → RETREAT
+ *
+ *  Serial Commands:
+ *    S<p1,p2,p3,v1,v2,v3,f1,f2,f3>  Forward trajectory
+ *    R<p1,p2,p3,v1,v2,v3,f1,f2,f3>  Retreat trajectory
+ *    RETREAT_COMPLETE                Host confirms retreat done
+ *    X                               System reset
+ *    E                               Emergency stop
+ *    1 / 2 / 0                       Manual fwd / rev / stop
+ *    K<motor,kp,kd>                  Set outer loop gains
+ *    P<motor,kpc,kdc>                Set inner loop gains
+ *    ADM,G,<val>                     Set admittance gain
+ *    ADMITTANCE_ON / OFF / RESET     Admittance toggle
+ *    ADMITTANCE_STATUS               Print admittance state
+ * ============================================================
+ */
 
-//==================================================================
-// CONSTANTS & CONFIGURATION
-//==================================================================
+// ============================================================
+//  PIN DEFINITIONS
+// ============================================================
 
-// Motor Control Speed
-const int MANUAL_SPEED  = 125;
-const int RETREAT_SPEED = 150;
+// Motor PWM pins (RPWM = forward, LPWM = reverse)
+const int RPWM1 = 3,  LPWM1 = 5;
+const int RPWM2 = 6,  LPWM2 = 9;
+const int RPWM3 = 10, LPWM3 = 11;
 
-// Load Cell Configuration
+// Encoder pins
+const int ENC1 = 4, ENC2 = 2, ENC3 = 8;
+
+// Current sensor pins
+const int CurrSen1 = A0, CurrSen2 = A1, CurrSen3 = A2;
+
+// Load cell (HX711) pins
 const int LOADCELL_DOUT_PIN = 12;
 const int LOADCELL_SCK_PIN  = 13;
-long  loadCellOffset    = 0;
-float latestValidLoad   = 0.0;
 
-// ---------------------------------------------------------------
-// YANK — pengganti ROC central difference
-//
-//   yank_k = (F_k - F_{k-1}) / Ts    ← backward difference
-//
-//   Ts = loadCellInterval / 1000.0  (0.1 s karena baca tiap 100 ms)
-//
-//   Keunggulan vs central difference lama:
-//     - Tidak perlu ring buffer 3 elemen
-//     - Tidak ada delay 1 sample (100 ms)
-//     - Hanya 1 variabel state: F_prev
-//     - Lebih ringan di memori dan komputasi
-//
-//   |yank| > THRESHOLD_YANK → trigger RETREAT
-//   Pakai |yank| (absolut) agar trigger di kedua arah
-//   (gaya naik mendadak maupun turun mendadak)
-// ---------------------------------------------------------------
-const float THRESHOLD_YANK = 30.0;   // N/s  — tuning di sini
-                                      // (nilai sama dengan THRESHOLD_ROC sebelumnya)
-float yank   = 0.0;   // dF/dt saat ini (N/s)
-float F_prev = 0.0;   // F_{k-1} untuk hitung yank
+// ============================================================
+//  TIMING INTERVALS (ms)
+// ============================================================
+const int INTERVAL_LOAD        = 100;   // Load cell + yank
+const int INTERVAL_ENCODER     = 1;     // Encoder read
+const int INTERVAL_VELOCITY    = 10000; // Velocity estimation
+const int INTERVAL_CTC         = 100;   // Outer loop (CTC)
+const int INTERVAL_PD          = 100;   // Inner loop (PD)
+const int INTERVAL_ADMITTANCE  = 10;    // Admittance update
+const int INTERVAL_PRINT       = 100;   // Status print
 
-// Adaptive Load Control Parameters
-const float LOAD_SCALE_MIN      = 0.15;
-const float LOAD_SCALE_MAX      = 1.0;
-const float KP_DAMPING_FACTOR   = 0.6;
+// ============================================================
+//  MOTOR & DRIVE PARAMETERS
+// ============================================================
+const float GR = 0.2786;   // Gear ratio
+const float kt = 0.0663;   // Motor torque constant (Nm/A)
+
+const int MANUAL_SPEED   = 125;   // PWM for manual mode
+const int RETREAT_SPEED  = 150;   // PWM for retreat mode (unused directly)
+
+const float RETREAT_VELOCITY_SCALE = 1.5;   // Velocity multiplier during retreat
+
+// ============================================================
+//  CURRENT SENSOR PARAMETERS
+// ============================================================
+const int   ADC_MAX   = 1023;
+const int   N_SAMPLES = 3;
+const float CAL_FAC   = 3.40;   // Calibration factor
+
+// ============================================================
+//  LOAD CELL
+// ============================================================
+long  loadCellOffset  = 0;
+float latestValidLoad = 0.0;
+
+// ============================================================
+//  YANK (dF/dt) — Backward Difference
+//  yank = (F_k - F_{k-1}) / Ts,  Ts = 0.1 s
+//  |yank| > THRESHOLD_YANK → trigger RETREAT
+// ============================================================
+const float THRESHOLD_YANK = 30.0;   // unit/s — tuning empiris
+
+float yank   = 0.0;
+float F_prev = 0.0;
+
+// ============================================================
+//  LOAD-BASED ADAPTIVE SCALING
+// ============================================================
+const float LOAD_MAX          = 100.0;
+const float LOAD_ALPHA        = 0.3;    // EMA smoothing factor
+const float LOAD_SCALE_MIN    = 0.15;
+const float LOAD_SCALE_MAX    = 1.0;
+const float KP_DAMPING_FACTOR = 0.6;
 const bool  ENABLE_ADAPTIVE_MANUAL = true;
-float smoothedLoad  = 0.0;
-const float LOAD_ALPHA = 0.3;
 
-// Retreat Control Parameters
-const float RETREAT_VELOCITY_SCALE = 1.5;
-bool retreatRequestSent = false;
+float smoothedLoad = 0.0;
 
-// Motor Control Parameters
-const float GR = 0.2786;
-const float kt = 0.0663;
+// ============================================================
+//  ADMITTANCE CONTROL  (M = 0, First-Order)
+//  Transfer function : B*Z' + K*Z = F_ext
+//  Backward Euler    : Z[n+1] = (B*Z[n] + F_ext*dt) / (B + K*dt)
+// ============================================================
+bool  admittanceEnabled = true;
+float admittanceGain    = 1.0;
 
-// Current Sensor Parameters
-const int   adcMax   = 1023;
-const int   nSamples = 3;
-const float CalFac   = 3.40;
+float Z_adm      = 0.0;   // Virtual displacement (m)
+float Zdot_adm   = 0.0;   // Virtual velocity (m/s)
+float Z_adm_prev = 0.0;
 
-// Timing Intervals (milliseconds)
-const int loadCellInterval        = 100;
-const int encoderInterval         = 1;
-const int veloInterval            = 10000;
-const int CTCcalculationInterval  = 100;
-const int PDcalculationInterval   = 100;
-const int admittanceUpdateInterval = 10;
+float B_adm = 500.0;   // Virtual damping  (N.s/m) — set by Hill-Zajac
+float K_adm = 614.1;   // Virtual stiffness (N/m)  — set by Hill-Zajac
 
-//==================================================================
-// ADMITTANCE CONTROL PARAMETERS
-// M = 0 → First-Order System:
-//   Transfer Function: B(t)*Z' + K(t)*Z = F_ext
-//   Backward Euler:    Z[n+1] = (B*Z[n] + F_ext*dt) / (B + K*dt)
-//==================================================================
-
-float B_adm         = 500.0;   // Virtual damping (N.s/m) - DINAMIS dari Hill-Zajac
-float K_adm         = 614.1;   // Virtual stiffness (N/m) - DINAMIS dari Hill-Zajac
-float admittanceGain = 1.0;
-
-//==================================================================
-// HILL-ZAJAC MUSCLE MODEL PARAMETERS (Zajac 1989)
-// Prinsip compliance:
-//   Gaya kecil → a kecil → a_inv besar → K & B besar (kaku)
-//   Gaya besar → a besar → a_inv kecil → K & B kecil (compliant)
-//
-// K = a_inv * F_MAX * fv(0) * |fl'(l0)|
-// B = a_inv * F_MAX * fl(l0) * |fv'(0)|
-//==================================================================
-
+// ============================================================
+//  HILL-ZAJAC MUSCLE MODEL  (Zajac 1989)
+//  Compliance prinsip:
+//    F kecil → a kecil → a_inv besar → K & B besar (kaku)
+//    F besar → a besar → a_inv kecil → K & B kecil (compliant)
+// ============================================================
 const float F_MAX    = 6000.0;
 const float FL_OPT   = 1.0;
 const float FV_ZERO  = 1.0;
@@ -119,248 +135,220 @@ const float K_MIN    = 100.0;
 const float B_MIN    = 50.0;
 const float K_SCALE  = 0.025;
 const float B_SCALE  = 0.018;
-const float LOAD_MAX = 100.0;
 
-// Variabel monitoring Hill-Zajac
+// Hill-Zajac monitoring
 float currentActivation = 0.0;
 float currentK = 614.1;
 float currentB = 500.0;
 
-// Trajectory pause
-const float FORCE_PAUSE_THRESHOLD = 5.0;
+// ============================================================
+//  TRAJECTORY PAUSE  (saat F_ext > FORCE_PAUSE_THRESHOLD)
+// ============================================================
+const float FORCE_PAUSE_THRESHOLD = 5.0;   // N (unit)
+
 bool  trajectoryPaused = false;
-float pausedRefPos1 = 0.0, pausedRefPos2 = 0.0, pausedRefPos3 = 0.0;
+float pausedRefPos1  = 0.0, pausedRefPos2  = 0.0, pausedRefPos3  = 0.0;
 float pausedRefVelo1 = 0.0, pausedRefVelo2 = 0.0, pausedRefVelo3 = 0.0;
-float pausedRefFc1 = 0.0, pausedRefFc2 = 0.0, pausedRefFc3 = 0.0;
+float pausedRefFc1   = 0.0, pausedRefFc2   = 0.0, pausedRefFc3   = 0.0;
 
-// Admittance state variables
-float Z_adm         = 0.0;
-float Zdot_adm      = 0.0;
-float Z_adm_prev    = 0.0;
-float Zdot_adm_prev = 0.0;
+// ============================================================
+//  SYSTEM STATE
+// ============================================================
+int  operatingMode   = 0;   // 0=idle, 1=forward, 2=retreat
+int  manualCommand   = 0;   // 0=stop, 1=fwd, 2=rev
+int  manipulatorState = 0;  // 0=running, 1=paused/retreat
 
-bool  admittanceEnabled = true;
-float Z_offset = 0.0;
-
-//==================================================================
-// PIN DEFINITIONS
-//==================================================================
-
-const int RPWM1 = 3,  LPWM1 = 5;
-const int RPWM2 = 6,  LPWM2 = 9;
-const int RPWM3 = 10, LPWM3 = 11;
-const int ENC1 = 4, ENC2 = 2, ENC3 = 8;
-const int CurrSen1 = A0, CurrSen2 = A1, CurrSen3 = A2;
-
-//==================================================================
-// SYSTEM STATE VARIABLES
-//==================================================================
-
-int  operatingMode  = 0;
-int  manualCommand  = 0;
-int  manipulatorState = 0;
 bool retreatHasBeenTriggered = false;
+bool retreatRequestSent      = false;
+
 String receivedData = "";
 
-//==================================================================
-// MOTOR VARIABLES
-//==================================================================
+// ============================================================
+//  MOTOR VARIABLES — Reference & Actual
+// ============================================================
 
-// Motor 1
-float kp1 = 110.0, kd1 = 0.1, kpc1 = 30.0, kdc1 = 0.1;
-float refPos1 = 0.0, refVelo1 = 0.0, refFc1 = 0.0, refCurrent1 = 0.0;
+// --- Outer loop gains (CTC) ---
+float kp1 = 110.0, kd1 = 0.1;
+float kp2 = 142.0, kd2 = 0.6;
+float kp3 = 150.0, kd3 = 0.3;
+
+// --- Inner loop gains (PD current) ---
+float kpc1 = 30.0, kdc1 = 0.1;
+float kpc2 = 33.0, kdc2 = 0.1;
+float kpc3 = 38.0, kdc3 = 0.1;
+
+// --- Reference signals ---
+float refPos1 = 0.0, refVelo1 = 0.0, refFc1 = 0.0;
+float refPos2 = 0.0, refVelo2 = 0.0, refFc2 = 0.0;
+float refPos3 = 0.0, refVelo3 = 0.0, refFc3 = 0.0;
+
+// --- Actual signals ---
 float ActPos1 = 0.0, ActVelo1 = 0.0, ActCurrent1 = 0.0;
-int   position1 = 0, prevState1 = 0;
-float controlValue1 = 0.0, ErrPos1 = 0.0, error1 = 0.0;
-float prevError1 = 0.0, prevPos1 = 0.0;
-
-// Motor 2
-float kp2 = 142.0, kd2 = 0.6, kpc2 = 33.0, kdc2 = 0.1;
-float refPos2 = 0.0, refVelo2 = 0.0, refFc2 = 0.0, refCurrent2 = 0.0;
 float ActPos2 = 0.0, ActVelo2 = 0.0, ActCurrent2 = 0.0;
-int   position2 = 0, prevState2 = 0;
-float controlValue2 = 0.0, ErrPos2 = 0.0, error2 = 0.0;
-float prevError2 = 0.0, prevPos2 = 0.0;
-
-// Motor 3
-float kp3 = 150.0, kd3 = 0.3, kpc3 = 38.0, kdc3 = 0.1;
-float refPos3 = 0.0, refVelo3 = 0.0, refFc3 = 0.0, refCurrent3 = 0.0;
 float ActPos3 = 0.0, ActVelo3 = 0.0, ActCurrent3 = 0.0;
-int   position3 = 0, prevState3 = 0;
-float controlValue3 = 0.0, ErrPos3 = 0.0, error3 = 0.0;
-float prevError3 = 0.0, prevPos3 = 0.0;
 
-//==================================================================
-// TIMING VARIABLES
-//==================================================================
-long lastLoadTime        = 0;
-long lastEncTime         = 0;
-long lastVeloTime        = 0;
-long lastCTCCalcTime     = 0;
-long lastPDCalcTime      = 0;
-long lastPrnTime         = 0;
-long lastAdmittanceTime  = 0;
+// --- Encoder counters ---
+int position1 = 0, prevState1 = 0;
+int position2 = 0, prevState2 = 0;
+int position3 = 0, prevState3 = 0;
 
-//==================================================================
-// YANK — Backward Difference (pengganti central difference)
-//
-//   yank = (F_curr - F_prev) / Ts
-//
-//   Dipanggil setiap loadCellInterval (100ms) → Ts = 0.1 s
-//   Setelah hitung, F_prev diupdate untuk iterasi berikutnya.
-//==================================================================
+// --- Control signals ---
+float refCurrent1 = 0.0, refCurrent2 = 0.0, refCurrent3 = 0.0;
+float controlValue1 = 0.0, controlValue2 = 0.0, controlValue3 = 0.0;
+float ErrPos1 = 0.0, ErrPos2 = 0.0, ErrPos3 = 0.0;
+
+// --- Error history (for PD derivative) ---
+float prevError1 = 0.0, prevError2 = 0.0, prevError3 = 0.0;
+float prevPos1   = 0.0, prevPos2   = 0.0, prevPos3   = 0.0;
+
+// ============================================================
+//  TIMING VARIABLES
+// ============================================================
+long lastLoadTime       = 0;
+long lastEncTime        = 0;
+long lastVeloTime       = 0;
+long lastCTCCalcTime    = 0;
+long lastPDCalcTime     = 0;
+long lastAdmittanceTime = 0;
+long lastPrnTime        = 0;
+
+// ============================================================
+//  HELPER: BASIC CONTROL MATH
+// ============================================================
+
+float computeError(float ref, float act) {
+    return ref - act;
+}
+
+// CTC outer loop: outputs reference current
+float CTC(float posErr, float kp, float veloErr, float kd,
+          float forceFeedforward, float gearRatio, float motorKt) {
+    return (posErr * kp + veloErr * kd + forceFeedforward) * gearRatio * motorKt;
+}
+
+// PD inner loop: outputs PWM control value
+float PD(float err, float kpc, float errDeriv, float kdc) {
+    return err * kpc + errDeriv * kdc;
+}
+
+// ============================================================
+//  LOAD-BASED ADAPTIVE HELPERS
+// ============================================================
+
+// Returns PWM scale factor [LOAD_SCALE_MIN, LOAD_SCALE_MAX]
+float getLoadScaling() {
+    smoothedLoad = LOAD_ALPHA * latestValidLoad + (1.0 - LOAD_ALPHA) * smoothedLoad;
+    float ratio  = constrain(smoothedLoad / LOAD_MAX, 0.0, 1.0);
+    return LOAD_SCALE_MAX - ratio * (LOAD_SCALE_MAX - LOAD_SCALE_MIN);
+}
+
+// Returns Kp scaled down under heavy load
+float getAdaptiveKp(float baseKp) {
+    float ratio = constrain(smoothedLoad / LOAD_MAX, 0.0, 1.0);
+    return baseKp * (1.0 - ratio * KP_DAMPING_FACTOR);
+}
+
+// ============================================================
+//  YANK  — Backward Difference
+// ============================================================
 void updateYank(float F_curr) {
-    const float Ts = loadCellInterval / 1000.0;  // 0.1 s
+    const float Ts = INTERVAL_LOAD / 1000.0;   // 0.1 s
     yank   = (F_curr - F_prev) / Ts;
     F_prev = F_curr;
 }
 
-//==================================================================
-// HILL-ZAJAC MUSCLE MODEL — tidak berubah dari versi asli
-//==================================================================
+// ============================================================
+//  HILL-ZAJAC MUSCLE MODEL
+// ============================================================
 void updateMuscleAdmittance(float F_external) {
     float a     = constrain(F_external / LOAD_MAX, 0.0, 1.0);
     float a_inv = 1.0 - a;
 
-    float K_muscle = a_inv * F_MAX * FV_ZERO * FL_SLOPE;
-    float B_muscle = a_inv * F_MAX * FL_OPT  * FV_SLOPE;
-
-    K_adm = max(K_muscle * K_SCALE, K_MIN);
-    B_adm = max(B_muscle * B_SCALE, B_MIN);
+    K_adm = max(a_inv * F_MAX * FV_ZERO * FL_SLOPE * K_SCALE, K_MIN);
+    B_adm = max(a_inv * F_MAX * FL_OPT  * FV_SLOPE * B_SCALE, B_MIN);
 
     currentActivation = a;
     currentK = K_adm;
     currentB = B_adm;
 }
 
-//==================================================================
-// ADMITTANCE CONTROL - FIRST ORDER (M = 0)
-// Backward Euler:
-//   Z[n+1] = (B*Z[n] + F_ext*dt) / (B + K*dt)
-//   Zdot   = (Z[n+1] - Z[n]) / dt
-//==================================================================
+// ============================================================
+//  ADMITTANCE CONTROL  (M=0, Backward Euler)
+// ============================================================
 void updateAdmittanceControl(float F_external, float dt) {
     float F_scaled = F_external * admittanceGain;
-
-    float denom = B_adm + K_adm * dt;
+    float denom    = B_adm + K_adm * dt;
     if (denom < 1e-6) denom = 1e-6;
 
     float Z_new  = (B_adm * Z_adm_prev + F_scaled * dt) / denom;
     Zdot_adm     = (Z_new - Z_adm_prev) / dt;
-
-    Z_adm         = Z_new;
-    Z_adm_prev    = Z_new;
-    Zdot_adm_prev = Zdot_adm;
+    Z_adm        = Z_new;
+    Z_adm_prev   = Z_new;
 }
 
 void resetAdmittance() {
-    Z_adm         = 0.0;
-    Zdot_adm      = 0.0;
-    Z_adm_prev    = 0.0;
-    Zdot_adm_prev = 0.0;
-    Z_offset      = 0.0;
-    K_adm = 614.1;  B_adm = 500.0;
+    Z_adm = 0.0; Z_adm_prev = 0.0;
+    Zdot_adm = 0.0;
+    K_adm = 614.1; B_adm = 500.0;
     currentK = 614.1; currentB = 500.0;
     currentActivation = 0.0;
-    // Reset yank state
-    yank   = 0.0;
-    F_prev = 0.0;
+    yank = 0.0; F_prev = 0.0;
 }
 
-//==================================================================
-// LOAD-BASED ADAPTIVE FUNCTIONS
-//==================================================================
-float getLoadScaling() {
-    smoothedLoad = (LOAD_ALPHA * latestValidLoad) +
-                   ((1.0 - LOAD_ALPHA) * smoothedLoad);
-    float ratio = constrain(smoothedLoad / LOAD_MAX, 0.0, 1.0);
-    return LOAD_SCALE_MAX - ratio * (LOAD_SCALE_MAX - LOAD_SCALE_MIN);
-}
+// ============================================================
+//  SENSOR READING
+// ============================================================
 
-float getAdaptiveKp(float baseKp) {
-    float ratio = constrain(smoothedLoad / LOAD_MAX, 0.0, 1.0);
-    return baseKp * (1.0 - ratio * KP_DAMPING_FACTOR);
-}
-
-//==================================================================
-// BASIC CONTROL FUNCTIONS
-//==================================================================
-float Error(float ref, float act) { return ref - act; }
-
-float CTC(float PosErr, float kp, float VeloErr, float kd,
-          float ForceID, float GR, float kt) {
-    return ((PosErr * kp) + (VeloErr * kd) + ForceID) * GR * kt;
-}
-
-float PD(float err, float kpc, float errdev, float kdc) {
-    return (err * kpc) + (errdev * kdc);
-}
-
-//==================================================================
-// SENSOR READING
-//==================================================================
+// HX711 raw read (24-bit, 2's complement)
 long readHX711() {
     long result = 0;
-    while (digitalRead(LOADCELL_DOUT_PIN));
+    while (digitalRead(LOADCELL_DOUT_PIN));   // Wait until ready
 
     for (int i = 0; i < 24; i++) {
         digitalWrite(LOADCELL_SCK_PIN, HIGH);
         delayMicroseconds(1);
-        result = result << 1;
-        if (digitalRead(LOADCELL_DOUT_PIN)) result++;
+        result = (result << 1) | digitalRead(LOADCELL_DOUT_PIN);
         digitalWrite(LOADCELL_SCK_PIN, LOW);
         delayMicroseconds(1);
     }
+    // Pulse 25th clock to set gain = 128
+    digitalWrite(LOADCELL_SCK_PIN, HIGH); delayMicroseconds(1);
+    digitalWrite(LOADCELL_SCK_PIN, LOW);  delayMicroseconds(1);
 
-    digitalWrite(LOADCELL_SCK_PIN, HIGH);
-    delayMicroseconds(1);
-    digitalWrite(LOADCELL_SCK_PIN, LOW);
-    delayMicroseconds(1);
-
-    if (result & 0x800000) result |= ~0xFFFFFF;
+    if (result & 0x800000) result |= ~0xFFFFFF;   // Sign extend
     return result;
 }
 
-float avg1() {
+// Averaged ADC read for each current sensor
+float readCurrentSensor(int pin) {
     float val = 0;
-    for (int i = 0; i < nSamples; i++) { val += analogRead(CurrSen1); delay(1); }
-    return val / adcMax / nSamples;
+    for (int i = 0; i < N_SAMPLES; i++) { val += analogRead(pin); delay(1); }
+    return val / ADC_MAX / N_SAMPLES;
 }
 
-float avg2() {
-    float val = 0;
-    for (int i = 0; i < nSamples; i++) { val += analogRead(CurrSen2); delay(1); }
-    return val / adcMax / nSamples;
-}
+// ============================================================
+//  COMMAND PARSING
+// ============================================================
 
-float avg3() {
-    float val = 0;
-    for (int i = 0; i < nSamples; i++) { val += analogRead(CurrSen3); delay(1); }
-    return val / adcMax / nSamples;
-}
-
-//==================================================================
-// COMMAND PARSING
-//==================================================================
 void parseTrajectoryCommand(String data, bool isRetreat) {
+    // Strip prefix 'S' or 'R'
     data.replace("S", "");
     data.replace("R", "");
 
-    float vals[9];
-    int idx = 0;
-    for (int i = 0; i < 8; i++) {
+    // Parse 9 comma-separated floats: p1,p2,p3,v1,v2,v3,f1,f2,f3
+    float vals[9] = {0};
+    for (int i = 0; i < 9; i++) {
         int comma = data.indexOf(',');
-        if (comma < 0) break;
-        vals[idx++] = data.substring(0, comma).toFloat();
-        data = data.substring(comma + 1);
+        if (comma < 0) { vals[i] = data.toFloat(); break; }
+        vals[i] = data.substring(0, comma).toFloat();
+        data    = data.substring(comma + 1);
     }
-    vals[idx] = data.toFloat();
 
-    if (trajectoryPaused) return;
+    if (trajectoryPaused) return;   // Ignore new commands while paused
 
     refPos1 = vals[0]; refPos2 = vals[1]; refPos3 = vals[2];
     refVelo1 = vals[3]; refVelo2 = vals[4]; refVelo3 = vals[5];
-    refFc1 = vals[6]; refFc2 = vals[7]; refFc3 = vals[8];
+    refFc1   = vals[6]; refFc2   = vals[7]; refFc3   = vals[8];
 
     if (isRetreat) {
         refVelo1 *= RETREAT_VELOCITY_SCALE;
@@ -370,53 +358,63 @@ void parseTrajectoryCommand(String data, bool isRetreat) {
 }
 
 void parseOuterLoopGains(String data) {
+    // Format: K<motor>,<kp>,<kd>
     data.replace("K", "");
     int c1 = data.indexOf(',');
-    int motorNum = data.substring(0, c1).toInt();
+    int motor = data.substring(0, c1).toInt();
     data = data.substring(c1 + 1);
     int c2 = data.indexOf(',');
     float newKp = data.substring(0, c2).toFloat();
     float newKd = data.substring(c2 + 1).toFloat();
 
-    if (motorNum == 1) { kp1 = newKp; kd1 = newKd; Serial.print("Motor 1 Kp="); Serial.print(kp1); Serial.print(" Kd="); Serial.println(kd1); }
-    else if (motorNum == 2) { kp2 = newKp; kd2 = newKd; Serial.print("Motor 2 Kp="); Serial.print(kp2); Serial.print(" Kd="); Serial.println(kd2); }
-    else if (motorNum == 3) { kp3 = newKp; kd3 = newKd; Serial.print("Motor 3 Kp="); Serial.print(kp3); Serial.print(" Kd="); Serial.println(kd3); }
+    if      (motor == 1) { kp1 = newKp; kd1 = newKd; }
+    else if (motor == 2) { kp2 = newKp; kd2 = newKd; }
+    else if (motor == 3) { kp3 = newKp; kd3 = newKd; }
+
+    Serial.print("Motor "); Serial.print(motor);
+    Serial.print(" Kp="); Serial.print(newKp);
+    Serial.print(" Kd="); Serial.println(newKd);
 }
 
 void parseInnerLoopGains(String data) {
+    // Format: P<motor>,<kpc>,<kdc>
     data.replace("P", "");
     int c1 = data.indexOf(',');
-    int motorNum = data.substring(0, c1).toInt();
+    int motor = data.substring(0, c1).toInt();
     data = data.substring(c1 + 1);
     int c2 = data.indexOf(',');
     float newKpc = data.substring(0, c2).toFloat();
     float newKdc = data.substring(c2 + 1).toFloat();
 
-    if (motorNum == 1) { kpc1 = newKpc; kdc1 = newKdc; Serial.print("Motor 1 Kpc="); Serial.print(kpc1); Serial.print(" Kdc="); Serial.println(kdc1); }
-    else if (motorNum == 2) { kpc2 = newKpc; kdc2 = newKdc; Serial.print("Motor 2 Kpc="); Serial.print(kpc2); Serial.print(" Kdc="); Serial.println(kdc2); }
-    else if (motorNum == 3) { kpc3 = newKpc; kdc3 = newKdc; Serial.print("Motor 3 Kpc="); Serial.print(kpc3); Serial.print(" Kdc="); Serial.println(kdc3); }
+    if      (motor == 1) { kpc1 = newKpc; kdc1 = newKdc; }
+    else if (motor == 2) { kpc2 = newKpc; kdc2 = newKdc; }
+    else if (motor == 3) { kpc3 = newKpc; kdc3 = newKdc; }
+
+    Serial.print("Motor "); Serial.print(motor);
+    Serial.print(" Kpc="); Serial.print(newKpc);
+    Serial.print(" Kdc="); Serial.println(newKdc);
 }
 
 void parseAdmittanceParams(String data) {
+    // Format: ADM,G,<val>   (only gain is tunable; K & B = Hill-Zajac)
     data.replace("ADM", "");
     int c = data.indexOf(',');
     String param = data.substring(0, c);
-    float val = data.substring(c + 1).toFloat();
+    float  val   = data.substring(c + 1).toFloat();
 
     if (param == "G") {
         admittanceGain = val;
-        Serial.print("Admittance Gain = "); Serial.println(admittanceGain);
-    } else if (param == "M") {
-        Serial.println("INFO: M = 0 (first-order mode), parameter M diabaikan");
+        Serial.print("Admittance gain = "); Serial.println(admittanceGain);
     } else {
-        Serial.println("Parameter tersedia: G (admittance gain)");
-        Serial.println("K dan B dinamis dari Hill-Zajac → tuning via K_SCALE/B_SCALE");
+        Serial.println("ERR: Unknown ADM param. Use ADM,G,<val>");
+        Serial.println("     K & B dikontrol Hill-Zajac via K_SCALE/B_SCALE");
     }
 }
 
-//==================================================================
-// SYSTEM CONTROL
-//==================================================================
+// ============================================================
+//  SYSTEM CONTROL
+// ============================================================
+
 void stopAllMotors() {
     analogWrite(RPWM1, 0); analogWrite(LPWM1, 0);
     analogWrite(RPWM2, 0); analogWrite(LPWM2, 0);
@@ -424,91 +422,98 @@ void stopAllMotors() {
 }
 
 void resetSystem() {
-    operatingMode  = 0;
-    manualCommand  = 0;
-    manipulatorState = 0;
-    retreatHasBeenTriggered = false;
-    retreatRequestSent = false;
-    trajectoryPaused = false;
+    operatingMode            = 0;
+    manualCommand            = 0;
+    manipulatorState         = 0;
+    retreatHasBeenTriggered  = false;
+    retreatRequestSent       = false;
+    trajectoryPaused         = false;
 
     stopAllMotors();
 
-    loadCellOffset = readHX711();
-    smoothedLoad   = 0.0;
+    // Re-tare load cell
+    loadCellOffset  = readHX711();
+    smoothedLoad    = 0.0;
     latestValidLoad = 0.0;
 
+    // Reset encoder & control states
     position1 = 0; position2 = 0; position3 = 0;
     ActPos1 = 0.0; ActPos2 = 0.0; ActPos3 = 0.0;
     prevPos1 = 0.0; prevPos2 = 0.0; prevPos3 = 0.0;
-    ErrPos1 = 0.0; ErrPos2 = 0.0; ErrPos3 = 0.0;
-    error1 = 0.0; error2 = 0.0; error3 = 0.0;
-    prevError1 = 0.0; prevError2 = 0.0; prevError3 = 0.0;
     ActVelo1 = 0.0; ActVelo2 = 0.0; ActVelo3 = 0.0;
+    ErrPos1  = 0.0; ErrPos2  = 0.0; ErrPos3  = 0.0;
+    prevError1 = 0.0; prevError2 = 0.0; prevError3 = 0.0;
 
     resetAdmittance();
 
-    Serial.println("System Reset OK\n");
+    Serial.println("System Reset OK");
 }
 
 void emergencyStop() {
-    operatingMode = 0;
-    manualCommand = 0;
+    operatingMode           = 0;
+    manualCommand           = 0;
     retreatHasBeenTriggered = false;
-    retreatRequestSent = false;
+    retreatRequestSent      = false;
     stopAllMotors();
     Serial.println("EMERGENCY_STOP");
 }
 
-//==================================================================
-// MOTOR CONTROL FUNCTIONS
-//==================================================================
+// ============================================================
+//  MOTOR CONTROL — Encoder, Velocity, CTC, PD, Apply
+// ============================================================
+
 void updateEncoders() {
+    // Motor 1
     int s1 = digitalRead(ENC1);
     if (s1 > prevState1) {
-        if (controlValue1 > 0) position1++;
+        if      (controlValue1 > 0) position1++;
         else if (controlValue1 < 0) position1--;
     }
-    ActPos1 = position1 * 0.245;
+    ActPos1   = position1 * 0.245;
     prevState1 = s1;
 
+    // Motor 2
     int s2 = digitalRead(ENC2);
     if (s2 > prevState2) {
-        if (controlValue2 > 0) position2++;
+        if      (controlValue2 > 0) position2++;
         else if (controlValue2 < 0) position2--;
     }
-    ActPos2 = position2 * 0.245;
+    ActPos2    = position2 * 0.245;
     prevState2 = s2;
 
+    // Motor 3
     int s3 = digitalRead(ENC3);
     if (s3 > prevState3) {
-        if (controlValue3 > 0) position3++;
+        if      (controlValue3 > 0) position3++;
         else if (controlValue3 < 0) position3--;
     }
-    ActPos3 = position3 * 0.245;
+    ActPos3    = position3 * 0.245;
     prevState3 = s3;
 }
 
 void updateVelocities() {
-    ActVelo1 = (ActPos1 - prevPos1) / 10;
-    ActVelo2 = (ActPos2 - prevPos2) / 10;
-    ActVelo3 = (ActPos3 - prevPos3) / 10;
+    // Ts = veloInterval / 1e6 s → divider = 10 (for mm/s consistency)
+    ActVelo1 = (ActPos1 - prevPos1) / 10.0;
+    ActVelo2 = (ActPos2 - prevPos2) / 10.0;
+    ActVelo3 = (ActPos3 - prevPos3) / 10.0;
     prevPos1 = ActPos1;
     prevPos2 = ActPos2;
     prevPos3 = ActPos3;
 }
 
 void calculateCTC() {
-    ErrPos1 = Error(refPos1, ActPos1);
-    ErrPos2 = Error(refPos2, ActPos2);
-    ErrPos3 = Error(refPos3, ActPos3);
+    ErrPos1 = computeError(refPos1, ActPos1);
+    ErrPos2 = computeError(refPos2, ActPos2);
+    ErrPos3 = computeError(refPos3, ActPos3);
 
-    refCurrent1 = CTC(ErrPos1, getAdaptiveKp(kp1), Error(refVelo1, ActVelo1), kd1, refFc1, GR, kt);
-    refCurrent2 = CTC(ErrPos2, getAdaptiveKp(kp2), Error(refVelo2, ActVelo2), kd2, refFc2, GR, kt);
-    refCurrent3 = CTC(ErrPos3, getAdaptiveKp(kp3), Error(refVelo3, ActVelo3), kd3, refFc3, GR, kt);
+    refCurrent1 = CTC(ErrPos1, getAdaptiveKp(kp1), computeError(refVelo1, ActVelo1), kd1, refFc1, GR, kt);
+    refCurrent2 = CTC(ErrPos2, getAdaptiveKp(kp2), computeError(refVelo2, ActVelo2), kd2, refFc2, GR, kt);
+    refCurrent3 = CTC(ErrPos3, getAdaptiveKp(kp3), computeError(refVelo3, ActVelo3), kd3, refFc3, GR, kt);
 }
 
 void calculateCTCWithAdmittance() {
-    float rp1 = refPos1 - (Z_adm * 1000.0);
+    // Modify reference position & velocity by admittance displacement
+    float rp1 = refPos1 - (Z_adm * 1000.0);   // convert m → mm
     float rp2 = refPos2 - (Z_adm * 1000.0);
     float rp3 = refPos3 - (Z_adm * 1000.0);
 
@@ -516,149 +521,156 @@ void calculateCTCWithAdmittance() {
     float rv2 = refVelo2 - Zdot_adm;
     float rv3 = refVelo3 - Zdot_adm;
 
-    ErrPos1 = Error(rp1, ActPos1);
-    ErrPos2 = Error(rp2, ActPos2);
-    ErrPos3 = Error(rp3, ActPos3);
+    ErrPos1 = computeError(rp1, ActPos1);
+    ErrPos2 = computeError(rp2, ActPos2);
+    ErrPos3 = computeError(rp3, ActPos3);
 
-    refCurrent1 = CTC(ErrPos1, getAdaptiveKp(kp1), Error(rv1, ActVelo1), kd1, refFc1, GR, kt);
-    refCurrent2 = CTC(ErrPos2, getAdaptiveKp(kp2), Error(rv2, ActVelo2), kd2, refFc2, GR, kt);
-    refCurrent3 = CTC(ErrPos3, getAdaptiveKp(kp3), Error(rv3, ActVelo3), kd3, refFc3, GR, kt);
+    refCurrent1 = CTC(ErrPos1, getAdaptiveKp(kp1), computeError(rv1, ActVelo1), kd1, refFc1, GR, kt);
+    refCurrent2 = CTC(ErrPos2, getAdaptiveKp(kp2), computeError(rv2, ActVelo2), kd2, refFc2, GR, kt);
+    refCurrent3 = CTC(ErrPos3, getAdaptiveKp(kp3), computeError(rv3, ActVelo3), kd3, refFc3, GR, kt);
 }
 
 void calculatePD() {
-    error1 = Error(refCurrent1, ActCurrent1);
-    error2 = Error(refCurrent2, ActCurrent2);
-    error3 = Error(refCurrent3, ActCurrent3);
+    float err1 = computeError(refCurrent1, ActCurrent1);
+    float err2 = computeError(refCurrent2, ActCurrent2);
+    float err3 = computeError(refCurrent3, ActCurrent3);
 
-    controlValue1 = PD(error1, kpc1, (error1 - prevError1) / 0.1, kdc1);
-    controlValue2 = PD(error2, kpc2, (error2 - prevError2) / 0.1, kdc2);
-    controlValue3 = PD(error3, kpc3, (error3 - prevError3) / 0.1, kdc3);
+    const float Ts_pd = INTERVAL_PD / 1000.0;   // 0.1 s
 
-    prevError1 = error1;
-    prevError2 = error2;
-    prevError3 = error3;
+    controlValue1 = PD(err1, kpc1, (err1 - prevError1) / Ts_pd, kdc1);
+    controlValue2 = PD(err2, kpc2, (err2 - prevError2) / Ts_pd, kdc2);
+    controlValue3 = PD(err3, kpc3, (err3 - prevError3) / Ts_pd, kdc3);
 
-    if (operatingMode == 1) {
-        float scale = getLoadScaling();
-        controlValue1 = constrain(controlValue1 * scale, -255, 255);
-        controlValue2 = constrain(controlValue2 * scale, -255, 255);
-        controlValue3 = constrain(controlValue3 * scale, -255, 255);
-    } else {
-        controlValue1 = constrain(controlValue1, -255, 255);
-        controlValue2 = constrain(controlValue2, -255, 255);
-        controlValue3 = constrain(controlValue3, -255, 255);
-    }
+    prevError1 = err1;
+    prevError2 = err2;
+    prevError3 = err3;
+
+    // Apply load-based scaling in forward mode
+    float scale = (operatingMode == 1) ? getLoadScaling() : 1.0;
+    controlValue1 = constrain(controlValue1 * scale, -255, 255);
+    controlValue2 = constrain(controlValue2 * scale, -255, 255);
+    controlValue3 = constrain(controlValue3 * scale, -255, 255);
 }
 
 void applyMotorControl() {
-    if (ErrPos1 > 0)      { analogWrite(RPWM1, abs(controlValue1)); analogWrite(LPWM1, 0); }
+    // Motor 1
+    if      (ErrPos1 > 0) { analogWrite(RPWM1, abs(controlValue1)); analogWrite(LPWM1, 0); }
     else if (ErrPos1 < 0) { analogWrite(RPWM1, 0); analogWrite(LPWM1, abs(controlValue1)); }
     else                  { analogWrite(RPWM1, 0); analogWrite(LPWM1, 0); }
 
-    if (ErrPos2 > 0)      { analogWrite(RPWM2, abs(controlValue2)); analogWrite(LPWM2, 0); }
+    // Motor 2
+    if      (ErrPos2 > 0) { analogWrite(RPWM2, abs(controlValue2)); analogWrite(LPWM2, 0); }
     else if (ErrPos2 < 0) { analogWrite(RPWM2, 0); analogWrite(LPWM2, abs(controlValue2)); }
     else                  { analogWrite(RPWM2, 0); analogWrite(LPWM2, 0); }
 
-    if (ErrPos3 > 0)      { analogWrite(RPWM3, abs(controlValue3)); analogWrite(LPWM3, 0); }
+    // Motor 3
+    if      (ErrPos3 > 0) { analogWrite(RPWM3, abs(controlValue3)); analogWrite(LPWM3, 0); }
     else if (ErrPos3 < 0) { analogWrite(RPWM3, 0); analogWrite(LPWM3, abs(controlValue3)); }
     else                  { analogWrite(RPWM3, 0); analogWrite(LPWM3, 0); }
 }
 
 void manualModeControl() {
-    int speed = ENABLE_ADAPTIVE_MANUAL ? (int)(MANUAL_SPEED * getLoadScaling()) : MANUAL_SPEED;
+    int speed = ENABLE_ADAPTIVE_MANUAL
+                ? (int)(MANUAL_SPEED * getLoadScaling())
+                : MANUAL_SPEED;
 
-    if (manualCommand == 1) {
+    if      (manualCommand == 1) {
         analogWrite(RPWM1, speed); analogWrite(LPWM1, 0);
         analogWrite(RPWM2, speed); analogWrite(LPWM2, 0);
         analogWrite(RPWM3, speed); analogWrite(LPWM3, 0);
-    } else if (manualCommand == 2) {
+    }
+    else if (manualCommand == 2) {
         analogWrite(RPWM1, 0); analogWrite(LPWM1, speed);
         analogWrite(RPWM2, 0); analogWrite(LPWM2, speed);
         analogWrite(RPWM3, 0); analogWrite(LPWM3, speed);
-    } else {
-        stopAllMotors();
     }
+    else { stopAllMotors(); }
 }
 
-//==================================================================
-// SETUP
-//==================================================================
+// ============================================================
+//  SETUP
+// ============================================================
 void setup() {
     Serial.begin(115200);
 
+    // Motor PWM
     pinMode(RPWM1, OUTPUT); pinMode(LPWM1, OUTPUT);
     pinMode(RPWM2, OUTPUT); pinMode(LPWM2, OUTPUT);
     pinMode(RPWM3, OUTPUT); pinMode(LPWM3, OUTPUT);
 
+    // Encoders & sensors
     pinMode(ENC1, INPUT); pinMode(ENC2, INPUT); pinMode(ENC3, INPUT);
-
     pinMode(CurrSen1, INPUT); pinMode(CurrSen2, INPUT); pinMode(CurrSen3, INPUT);
 
+    // Load cell
     pinMode(LOADCELL_DOUT_PIN, INPUT);
-    pinMode(LOADCELL_SCK_PIN, OUTPUT);
+    pinMode(LOADCELL_SCK_PIN,  OUTPUT);
 
     while (!Serial) { ; }
 
-    manipulatorState = 0;
-    operatingMode    = 0;
+    loadCellOffset = readHX711();   // Initial tare
 
-    Serial.println("===========================================");
-    Serial.println("  3-RPS Parallel Robot Control System");
-    Serial.println("  Admittance + Hill-Zajac Dynamic K & B");
-    Serial.println("  M = 0 | First-Order | Backward Euler");
-    Serial.println("  Retreat trigger: |yank| > THRESHOLD_YANK");
-    Serial.println("  Yank method    : backward diff (F_k-F_{k-1})/Ts");
-    Serial.println("  Ref: Zajac (1989)");
-    Serial.println("===========================================");
-    Serial.print("  K range: "); Serial.print(K_MIN);
-    Serial.print(" ~ "); Serial.print(F_MAX * FV_ZERO * FL_SLOPE * K_SCALE, 1);
-    Serial.println(" N/m");
-    Serial.print("  B range: "); Serial.print(B_MIN);
-    Serial.print(" ~ "); Serial.print(F_MAX * FL_OPT * FV_SLOPE * B_SCALE, 1);
-    Serial.println(" N.s/m");
-    Serial.print("  Yank threshold : "); Serial.print(THRESHOLD_YANK, 1); Serial.println(" N/s");
-    Serial.println("  Ts             : 0.1 s (loadCellInterval=100ms)");
-    Serial.println("===========================================\n");
+    Serial.println(F("=============================================="));
+    Serial.println(F("  3-RPS Parallel Robot Control System"));
+    Serial.println(F("  Admittance + Hill-Zajac Dynamic K & B"));
+    Serial.println(F("  M=0 | First-Order | Backward Euler"));
+    Serial.println(F("  Retreat: |yank| > THRESHOLD_YANK"));
+    Serial.println(F("=============================================="));
+    Serial.print(F("  K range : ")); Serial.print(K_MIN, 0);
+    Serial.print(F(" ~ ")); Serial.print(F_MAX * FV_ZERO * FL_SLOPE * K_SCALE, 1);
+    Serial.println(F(" N/m"));
+    Serial.print(F("  B range : ")); Serial.print(B_MIN, 0);
+    Serial.print(F(" ~ ")); Serial.print(F_MAX * FL_OPT * FV_SLOPE * B_SCALE, 1);
+    Serial.println(F(" N.s/m"));
+    Serial.print(F("  Yank thresh : ")); Serial.print(THRESHOLD_YANK, 1);
+    Serial.println(F(" unit/s  (Ts=0.1s)"));
+    Serial.println(F("==============================================\n"));
 }
 
-//==================================================================
-// MAIN LOOP
-//==================================================================
+// ============================================================
+//  MAIN LOOP
+// ============================================================
 void loop() {
-    long currentTime = millis();
+    long now = millis();
 
-    //================================================================
-    // SERIAL COMMAND PROCESSING
-    //================================================================
+    // ----------------------------------------------------------
+    //  SERIAL COMMAND PARSING
+    // ----------------------------------------------------------
     if (Serial.available() > 0) {
-        char c = Serial.read();
-        receivedData += c;
+        while (Serial.available() > 0) {
+            char c = Serial.read();
+            receivedData += c;
 
         if (c == '\n') {
             receivedData.trim();
 
+            // --- Trajectory commands ---
             if (receivedData.startsWith("S")) {
-                operatingMode = 1;
+                operatingMode           = 1;
                 retreatHasBeenTriggered = false;
-                retreatRequestSent = false;
-                manipulatorState = 0;
+                retreatRequestSent      = false;
+                manipulatorState        = 0;
                 parseTrajectoryCommand(receivedData, false);
             }
             else if (receivedData.startsWith("R") && receivedData.indexOf(',') > 0) {
-                operatingMode = 2;
+                operatingMode    = 2;
                 manipulatorState = 0;
                 parseTrajectoryCommand(receivedData, true);
             }
             else if (receivedData == "RETREAT_COMPLETE") {
-                operatingMode = 0;
-                manualCommand = 0;
+                operatingMode           = 0;
+                manualCommand           = 0;
                 retreatHasBeenTriggered = false;
-                retreatRequestSent = false;
+                retreatRequestSent      = false;
                 stopAllMotors();
                 Serial.println("ACK_RETREAT_COMPLETE");
             }
+
+            // --- System commands ---
             else if (receivedData.startsWith("X")) { resetSystem(); }
             else if (receivedData.startsWith("E")) { emergencyStop(); }
+
+            // --- Manual mode ---
             else if (receivedData == "1") {
                 operatingMode = 0; manualCommand = 1;
                 retreatHasBeenTriggered = false; retreatRequestSent = false;
@@ -667,7 +679,11 @@ void loop() {
                 operatingMode = 0; manualCommand = 2;
                 retreatHasBeenTriggered = false; retreatRequestSent = false;
             }
-            else if (receivedData == "0") { operatingMode = 0; manualCommand = 0; }
+            else if (receivedData == "0") {
+                operatingMode = 0; manualCommand = 0;
+            }
+
+            // --- Gain tuning ---
             else if (receivedData.startsWith("K")) {
                 operatingMode = 0; manualCommand = 0;
                 parseOuterLoopGains(receivedData);
@@ -676,9 +692,11 @@ void loop() {
                 operatingMode = 0; manualCommand = 0;
                 parseInnerLoopGains(receivedData);
             }
+
+            // --- Admittance commands ---
             else if (receivedData == "ADMITTANCE_ON") {
                 admittanceEnabled = true;
-                Serial.println("Admittance ON (Hill-Zajac Dynamic K & B, M=0, Backward Euler)");
+                Serial.println("Admittance ON");
             }
             else if (receivedData == "ADMITTANCE_OFF") {
                 admittanceEnabled = false;
@@ -692,176 +710,183 @@ void loop() {
                 parseAdmittanceParams(receivedData);
             }
             else if (receivedData == "ADMITTANCE_STATUS") {
-                Serial.println("\n=== Admittance Status (Hill-Zajac, M=0) ===");
-                Serial.print("Enabled     : "); Serial.println(admittanceEnabled ? "YES" : "NO");
-                Serial.println("Model       : First-order (Backward Euler)");
-                Serial.print("Activation  : "); Serial.println(currentActivation, 4);
-                Serial.print("K_adm       : "); Serial.print(currentK, 2); Serial.println(" N/m");
-                Serial.print("B_adm       : "); Serial.print(currentB, 2); Serial.println(" N.s/m");
-                Serial.print("tau (B/K)   : "); Serial.print(currentB / currentK, 4); Serial.println(" s");
-                Serial.print("Z_adm       : "); Serial.print(Z_adm * 1000, 4); Serial.println(" mm");
-                Serial.print("Zdot_adm    : "); Serial.print(Zdot_adm * 1000, 4); Serial.println(" mm/s");
-                Serial.print("F_ext       : "); Serial.print(latestValidLoad, 2); Serial.println(" N");
-                Serial.print("Yank        : "); Serial.print(yank, 2); Serial.println(" N/s");
-                Serial.print("Yank thresh : "); Serial.print(THRESHOLD_YANK, 1); Serial.println(" N/s");
-                Serial.println("Method      : (F_k - F_{k-1}) / Ts  [backward diff]");
-                Serial.println("============================================\n");
+                Serial.println(F("\n=== Admittance Status ==="));
+                Serial.print(F("Enabled    : ")); Serial.println(admittanceEnabled ? "YES" : "NO");
+                Serial.print(F("Activation : ")); Serial.println(currentActivation, 4);
+                Serial.print(F("K_adm      : ")); Serial.print(currentK, 2); Serial.println(F(" N/m"));
+                Serial.print(F("B_adm      : ")); Serial.print(currentB, 2); Serial.println(F(" N.s/m"));
+                Serial.print(F("tau (B/K)  : ")); Serial.print(currentB / currentK, 4); Serial.println(F(" s"));
+                Serial.print(F("Z_adm      : ")); Serial.print(Z_adm * 1000, 4); Serial.println(F(" mm"));
+                Serial.print(F("Zdot_adm   : ")); Serial.print(Zdot_adm * 1000, 4); Serial.println(F(" mm/s"));
+                Serial.print(F("F_ext      : ")); Serial.print(latestValidLoad, 2); Serial.println(F(" unit"));
+                Serial.print(F("Yank       : ")); Serial.print(yank, 2); Serial.println(F(" unit/s"));
+                Serial.print(F("Yank thresh: ")); Serial.print(THRESHOLD_YANK, 1); Serial.println(F(" unit/s"));
+                Serial.println(F("=========================\n"));
+            }
+
+            else {
+                Serial.print(F("ERR: Unknown command -> ")); Serial.println(receivedData);
             }
 
             receivedData = "";
         }
     }
 
-    //================================================================
-    // AUTO MODE (FORWARD / RETREAT)
-    //================================================================
+    // ----------------------------------------------------------
+    //  AUTO MODE (FORWARD = 1 | RETREAT = 2)
+    // ----------------------------------------------------------
     if (operatingMode == 1 || operatingMode == 2) {
 
-        //------------------------------------------------------------
-        // Load cell reading + yank (forward only)
-        //------------------------------------------------------------
-        if (operatingMode == 1 && currentTime - lastLoadTime >= loadCellInterval) {
-
-            if (retreatHasBeenTriggered) {
-                manipulatorState = 1;
-            } else {
+        // --- Load cell + yank (forward only) ---
+        if (operatingMode == 1 && now - lastLoadTime >= INTERVAL_LOAD) {
+            if (digitalRead(LOADCELL_DOUT_PIN) == LOW) {
                 long  raw  = readHX711() - loadCellOffset;
                 float load = constrain(raw / 10000.0, 0.0, 100.0);
                 latestValidLoad = load;
-
-                // Hitung yank (backward diff)
                 updateYank(load);
 
-                // Retreat trigger: |yank| melebihi threshold
-                // Pakai abs(yank) → trigger di kedua arah perubahan gaya
-                if (abs(yank) > THRESHOLD_YANK) {
+                if (retreatHasBeenTriggered) {
                     manipulatorState = 1;
+                } else if (abs(yank) > THRESHOLD_YANK) {
+                    manipulatorState        = 1;
                     retreatHasBeenTriggered = true;
                     if (!retreatRequestSent) {
-                        Serial.print("RETREAT (yank=");
+                        Serial.print(F("RETREAT yank="));
                         Serial.print(yank, 2);
-                        Serial.println(" N/s)");
+                        Serial.println(F(" unit/s"));
                         retreatRequestSent = true;
                     }
                 } else {
                     manipulatorState = 0;
                 }
+
+                lastLoadTime = now;
             }
-            lastLoadTime = currentTime;
         }
 
-        //------------------------------------------------------------
-        // Admittance update (Hill-Zajac, tidak berubah)
-        //------------------------------------------------------------
+        // --- Admittance update (forward only) ---
         if (admittanceEnabled && operatingMode == 1 &&
-            currentTime - lastAdmittanceTime >= admittanceUpdateInterval) {
+            now - lastAdmittanceTime >= INTERVAL_ADMITTANCE) {
 
-            float F_ext  = latestValidLoad;
-            float dt_adm = admittanceUpdateInterval / 1000.0;
+            float dt = INTERVAL_ADMITTANCE / 1000.0;
+            updateMuscleAdmittance(latestValidLoad);
+            updateAdmittanceControl(latestValidLoad, dt);
 
-            updateMuscleAdmittance(F_ext);
-            updateAdmittanceControl(F_ext, dt_adm);
-
-            if (F_ext > FORCE_PAUSE_THRESHOLD && !trajectoryPaused) {
+            // Trajectory pause/resume on contact force
+            if (latestValidLoad > FORCE_PAUSE_THRESHOLD && !trajectoryPaused) {
                 trajectoryPaused = true;
-                pausedRefPos1 = refPos1; pausedRefPos2 = refPos2; pausedRefPos3 = refPos3;
+                pausedRefPos1  = refPos1;  pausedRefPos2  = refPos2;  pausedRefPos3  = refPos3;
                 pausedRefVelo1 = refVelo1; pausedRefVelo2 = refVelo2; pausedRefVelo3 = refVelo3;
-                pausedRefFc1 = refFc1; pausedRefFc2 = refFc2; pausedRefFc3 = refFc3;
-                Serial.println("PAUSE_TRAJECTORY");
-            } else if (F_ext <= FORCE_PAUSE_THRESHOLD && trajectoryPaused) {
+                pausedRefFc1   = refFc1;   pausedRefFc2   = refFc2;   pausedRefFc3   = refFc3;
+                Serial.println(F("PAUSE_TRAJECTORY"));
+            }
+            else if (latestValidLoad <= FORCE_PAUSE_THRESHOLD && trajectoryPaused) {
                 trajectoryPaused = false;
                 refPos1 = pausedRefPos1; refPos2 = pausedRefPos2; refPos3 = pausedRefPos3;
                 refVelo1 = 0.0; refVelo2 = 0.0; refVelo3 = 0.0;
                 refFc1 = pausedRefFc1; refFc2 = pausedRefFc2; refFc3 = pausedRefFc3;
-                Serial.println("RESUME_TRAJECTORY");
+                Serial.println(F("RESUME_TRAJECTORY"));
             }
 
-            lastAdmittanceTime = currentTime;
+            lastAdmittanceTime = now;
         }
 
-        //------------------------------------------------------------
-        // Encoder update
-        //------------------------------------------------------------
-        if (currentTime - lastEncTime >= encoderInterval && manipulatorState != 1) {
+        // --- Encoder (only when running) ---
+        if (manipulatorState == 0 && now - lastEncTime >= INTERVAL_ENCODER) {
             updateEncoders();
-            lastEncTime = currentTime;
+            lastEncTime = now;
         }
 
-        //------------------------------------------------------------
-        // Control calculation (hanya saat manipulatorState == 0)
-        //------------------------------------------------------------
+        // --- Control loops (only when running) ---
         if (manipulatorState == 0) {
-            if (currentTime - lastVeloTime >= veloInterval) {
+
+            if (now - lastVeloTime >= INTERVAL_VELOCITY) {
                 updateVelocities();
-                lastVeloTime = currentTime;
+                lastVeloTime = now;
             }
 
-            if (currentTime - lastCTCCalcTime >= CTCcalculationInterval) {
-                if (admittanceEnabled && operatingMode == 1) {
-                    calculateCTCWithAdmittance();
-                } else {
-                    calculateCTC();
-                }
-                lastCTCCalcTime = currentTime;
+            if (now - lastCTCCalcTime >= INTERVAL_CTC) {
+                (admittanceEnabled && operatingMode == 1)
+                    ? calculateCTCWithAdmittance()
+                    : calculateCTC();
+                lastCTCCalcTime = now;
             }
 
-            if (currentTime - lastPDCalcTime >= PDcalculationInterval) {
+            if (now - lastPDCalcTime >= INTERVAL_PD) {
                 calculatePD();
-                lastPDCalcTime = currentTime;
+                lastPDCalcTime = now;
             }
         }
 
-        //------------------------------------------------------------
-        // Motor execution
-        //------------------------------------------------------------
-        if (manipulatorState == 0) {
-            applyMotorControl();
-        } else {
-            stopAllMotors();
-        }
+        // --- Motor output ---
+        (manipulatorState == 0) ? applyMotorControl() : stopAllMotors();
 
-        //------------------------------------------------------------
-        // Status reporting
-        //------------------------------------------------------------
-        if (currentTime - lastPrnTime >= loadCellInterval) {
-            String status = (manipulatorState == 0) ? "running" : "paused";
-            String mode   = (operatingMode == 1) ? "forward" : "retreat";
-
-            Serial.print("status:"); Serial.print(status);
-            Serial.print(",mode:"); Serial.print(mode);
-            Serial.print(",load:"); Serial.print(latestValidLoad, 2);
-            Serial.print(",yank:"); Serial.print(yank, 2);
-            Serial.print(",yank_thresh:"); Serial.print(THRESHOLD_YANK, 1);
-            Serial.print(",scale:"); Serial.print(getLoadScaling(), 2);
-            Serial.print(",pos:"); Serial.print(ActPos1, 2);
-            Serial.print(","); Serial.print(ActPos2, 2);
-            Serial.print(","); Serial.print(ActPos3, 2);
+        // --- Status print ---
+        if (now - lastPrnTime >= INTERVAL_PRINT) {
+            Serial.print(F("s:")); Serial.print(manipulatorState == 0 ? "run" : "pause");
+            Serial.print(F(",m:")); Serial.print(operatingMode == 1 ? "fwd" : "ret");
+            Serial.print(F(",load:")); Serial.print(latestValidLoad, 2);
+            Serial.print(F(",yank:")); Serial.print(yank, 2);
+            Serial.print(F(",ythr:")); Serial.print(THRESHOLD_YANK, 1);
+            Serial.print(F(",sc:"));  Serial.print(getLoadScaling(), 2);
+            
+            // Actual positions
+            Serial.print(F(",p1:")); Serial.print(ActPos1, 2);
+            Serial.print(F(",p2:")); Serial.print(ActPos2, 2);
+            Serial.print(F(",p3:")); Serial.print(ActPos3, 2);
+            
+            // Reference positions
+            Serial.print(F(",rp1:")); Serial.print(refPos1, 2);
+            Serial.print(F(",rp2:")); Serial.print(refPos2, 2);
+            Serial.print(F(",rp3:")); Serial.print(refPos3, 2);
+            
+            // Error positions
+            Serial.print(F(",ep1:")); Serial.print(ErrPos1, 2);
+            Serial.print(F(",ep2:")); Serial.print(ErrPos2, 2);
+            Serial.print(F(",ep3:")); Serial.print(ErrPos3, 2);
+            
+            // Velocities
+            Serial.print(F(",v1:")); Serial.print(ActVelo1, 2);
+            Serial.print(F(",v2:")); Serial.print(ActVelo2, 2);
+            Serial.print(F(",v3:")); Serial.print(ActVelo3, 2);
+            
+            // Currents (Note: Assuming ActCurrent is updated elsewhere, or just printing the var)
+            Serial.print(F(",c1:")); Serial.print(ActCurrent1, 2);
+            Serial.print(F(",c2:")); Serial.print(ActCurrent2, 2);
+            Serial.print(F(",c3:")); Serial.print(ActCurrent3, 2);
+            
+            // PWM / Control values
+            Serial.print(F(",pwm1:")); Serial.print(controlValue1, 0);
+            Serial.print(F(",pwm2:")); Serial.print(controlValue2, 0);
+            Serial.print(F(",pwm3:")); Serial.print(controlValue3, 0);
 
             if (admittanceEnabled && operatingMode == 1) {
-                Serial.print(",activation:"); Serial.print(currentActivation, 3);
-                Serial.print(",K_adm:"); Serial.print(currentK, 2);
-                Serial.print(",B_adm:"); Serial.print(currentB, 2);
-                Serial.print(",tau:"); Serial.print(currentB / currentK, 4);
-                Serial.print(",Z_adm:"); Serial.print(Z_adm * 1000, 3);
-                Serial.print(",Zdot_adm:"); Serial.print(Zdot_adm * 1000, 3);
-                Serial.print(",traj_paused:"); Serial.print(trajectoryPaused ? "1" : "0");
+                Serial.print(F(",act:"));  Serial.print(currentActivation, 3);
+                Serial.print(F(",K:"));    Serial.print(currentK, 2);
+                Serial.print(F(",B:"));    Serial.print(currentB, 2);
+                Serial.print(F(",tau:"));  Serial.print(currentB / currentK, 4);
+                Serial.print(F(",Z:"));    Serial.print(Z_adm * 1000, 3);
+                Serial.print(F(",Zd:"));   Serial.print(Zdot_adm * 1000, 3);
+                Serial.print(F(",tpause:")); Serial.print(trajectoryPaused ? 1 : 0);
             }
 
-            Serial.println("");
-            lastPrnTime = currentTime;
+            Serial.println();
+            lastPrnTime = now;
         }
     }
 
-    //================================================================
-    // MANUAL MODE
-    //================================================================
+    // ----------------------------------------------------------
+    //  MANUAL MODE
+    // ----------------------------------------------------------
     else {
-        if (ENABLE_ADAPTIVE_MANUAL && currentTime - lastLoadTime >= loadCellInterval) {
-            long  raw  = readHX711() - loadCellOffset;
-            float load = constrain(raw / 10000.0, 0.0, 100.0);
-            latestValidLoad = load;
-            updateYank(load);   // yank tetap di-update di manual mode
-            lastLoadTime = currentTime;
+        if (ENABLE_ADAPTIVE_MANUAL && now - lastLoadTime >= INTERVAL_LOAD) {
+            if (digitalRead(LOADCELL_DOUT_PIN) == LOW) {
+                long  raw  = readHX711() - loadCellOffset;
+                float load = constrain(raw / 10000.0, 0.0, 100.0);
+                latestValidLoad = load;
+                updateYank(load);
+                lastLoadTime = now;
+            }
         }
         manualModeControl();
     }

@@ -85,5 +85,9 @@ const int MODBUS_PORT = 5020;
 const int MODBUS_SLAVE_ID = 1;
 const int MODBUS_REGISTER_COUNT = 8000;
 
+// Data Logging Configuration
+constexpr const char LOG_DIR[] = "data/logs/";
+constexpr const char LOG_FILENAME[] = "arduino_log.csv";
+
 #endif // CONFIG_H
 

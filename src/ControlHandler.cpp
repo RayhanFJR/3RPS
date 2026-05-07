@@ -12,6 +12,19 @@ ControlHandler::ControlHandler(ModbusHandler& modbus, SerialHandler& serial,
       target_cycle(1), current_cycle(0),
       retreatIndex(0), retreatActive(false), lastForwardIndex(0),
       autoReturnToIdle(false) {
+    initLogger();
+}
+
+void ControlHandler::initLogger() {
+    // Pastikan folder exist atau minimal log bisa terbuat (biasanya perlu mkdir, tapi kita asumsikan folder data/logs/ ada)
+    logFile.open(std::string(LOG_DIR) + std::string(LOG_FILENAME), std::ios::out | std::ios::app);
+    if (!logFile.is_open()) {
+        std::cerr << "Warning: Could not open log file at " << LOG_DIR << LOG_FILENAME << ". Creating in current dir..." << std::endl;
+        logFile.open(std::string(LOG_FILENAME), std::ios::out | std::ios::app);
+    }
+    if (logFile.is_open()) {
+        std::cout << "Data logger initialized." << std::endl;
+    }
 }
 
 void ControlHandler::handleManualControl() {
@@ -186,6 +199,24 @@ void ControlHandler::processArduinoFeedback(std::string& arduinoFeedbackState,
     
     std::string resultString = serialHandler.readData();
     if (resultString.empty()) return;
+    
+    // === Data Logging ===
+    if (logFile.is_open()) {
+        static bool newLineStarted = true;
+        for (char c : resultString) {
+            if (newLineStarted) {
+                auto now = std::chrono::system_clock::now();
+                std::time_t now_time = std::chrono::system_clock::to_time_t(now);
+                auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()) % 1000;
+                logFile << std::put_time(std::localtime(&now_time), "%Y-%m-%d %H:%M:%S.") 
+                        << std::setfill('0') << std::setw(3) << ms.count() << ", ";
+                newLineStarted = false;
+            }
+            logFile << c;
+            if (c == '\n') newLineStarted = true;
+        }
+        logFile.flush();
+    }
     
     // === CRITICAL: Check for pause/resume signals FIRST ===
     serialHandler.processArduinoFeedback(resultString);
