@@ -88,13 +88,27 @@ float latestValidLoad = 0.0;
 // ============================================================
 //  YANK (dF/dt) — Backward Difference
 //  yank = (F_k - F_{k-1}) / Ts,  Ts = 0.1 s
-//  |yank| > THRESHOLD_YANK → trigger RETREAT
+//  |yank| > THRESHOLD_YANK (N kali berturut) → trigger pause
 // ============================================================
-const float THRESHOLD_YANK     = 30.0;   // unit/s — tuning empiris
+const float THRESHOLD_YANK     = 70.0;   // unit/s — dinaikkan dari 30 agar tidak terlalu sensitif
 const int   YANK_PAUSE_MS      = 400;    // Jeda singkat saat spike (bukan full retreat)
+const int   YANK_DEBOUNCE_REQ  = 3;     // Harus N kali berturut-turut sebelum trigger
 
-float yank   = 0.0;
-float F_prev = 0.0;
+float yank            = 0.0;
+float F_prev          = 0.0;
+int   yankDebounceCount = 0;   // Counter debounce yank
+
+// ============================================================
+//  WAYPOINT FEEDBACK
+//  Arduino eksekusi waypoint → sampai → kirim WAYPOINT_REACHED
+//  Mini PC baru boleh kirim waypoint berikutnya
+// ============================================================
+const float WAYPOINT_TOL       = 3.0;   // mm — error dianggap "sampai"
+const long  WAYPOINT_SETTLE_MS = 300;   // ms — harus di dalam toleransi sebelum ACK
+
+bool  waypointActive    = false;   // Sedang tracking waypoint
+bool  waypointAckSent   = false;   // Sudah kirim WAYPOINT_REACHED?
+long  waypointReachedAt = 0;       // Kapan pertama kali masuk toleransi
 
 // ============================================================
 //  LOAD-BASED ADAPTIVE SCALING
@@ -166,6 +180,13 @@ int  manipulatorState = 0;  // 0=running, 1=paused/retreat
 bool retreatHasBeenTriggered = false;
 bool retreatRequestSent      = false;
 long yankPauseUntil          = 0;   // Soft pause setelah spike yank
+
+// Helper: reset semua state waypoint
+void resetWaypointState() {
+    waypointActive    = false;
+    waypointAckSent   = false;
+    waypointReachedAt = 0;
+}
 
 String receivedData = "";
 
@@ -394,6 +415,11 @@ void parseTrajectoryCommand(String data, bool isRetreat) {
         refVelo2 *= RETREAT_VELOCITY_SCALE;
         refVelo3 *= RETREAT_VELOCITY_SCALE;
     }
+
+    // Reset waypoint feedback state untuk titik baru
+    waypointActive    = true;
+    waypointAckSent   = false;
+    waypointReachedAt = 0;
 }
 
 void parseOuterLoopGains(String data) {
@@ -468,7 +494,9 @@ void resetSystem() {
     retreatRequestSent       = false;
     trajectoryPaused         = false;
     yankPauseUntil           = 0;
+    yankDebounceCount        = 0;
 
+    resetWaypointState();
     stopAllMotors();
 
     // Re-tare load cell
@@ -859,11 +887,19 @@ void loop() {
         if (isAutoMotion() && now - lastYankTime >= INTERVAL_YANK) {
             updateYank(latestValidLoad);
 
+            // Debounce: harus N kali berturut-turut melewati threshold
             if (abs(yank) > THRESHOLD_YANK) {
-                yankPauseUntil = now + YANK_PAUSE_MS;
-                Serial.print(F("YANK_PAUSE yank="));
-                Serial.print(yank, 2);
-                Serial.println(F(" unit/s"));
+                yankDebounceCount++;
+                if (yankDebounceCount >= YANK_DEBOUNCE_REQ) {
+                    yankPauseUntil    = now + YANK_PAUSE_MS;
+                    yankDebounceCount = 0;
+                    waypointReachedAt = 0;   // Paksa settle ulang setelah pause
+                    Serial.print(F("YANK_PAUSE yank="));
+                    Serial.print(yank, 2);
+                    Serial.println(F(" unit/s"));
+                }
+            } else {
+                yankDebounceCount = 0;   // Reset jika tidak berturut-turut
             }
 
             lastYankTime = now;
@@ -908,7 +944,9 @@ void loop() {
                 Serial.println(F("PAUSE_TRAJECTORY"));
             }
             else if (load <= FORCE_RESUME_THRESHOLD && trajectoryPaused) {
-                trajectoryPaused = false;
+                trajectoryPaused  = false;
+                waypointReachedAt = 0;   // Harus settle ulang sebelum kirim ACK
+                waypointAckSent   = false;
                 refPos1  = pausedRefPos1;  refPos2  = pausedRefPos2;  refPos3  = pausedRefPos3;
                 refVelo1 = pausedRefVelo1; refVelo2 = pausedRefVelo2; refVelo3 = pausedRefVelo3;
                 refFc1   = pausedRefFc1;   refFc2   = pausedRefFc2;   refFc3   = pausedRefFc3;
@@ -942,6 +980,30 @@ void loop() {
             if (now - lastPDCalcTime >= INTERVAL_PD) {
                 calculatePD();
                 lastPDCalcTime = now;
+            }
+        }
+
+        // --- Waypoint reached check ---
+        // Cek apakah semua motor sudah dalam toleransi posisi
+        // Hanya kirim ACK jika: tidak sedang pause, manipulatorState running,
+        // dan belum kirim ACK untuk waypoint ini
+        if (waypointActive && !waypointAckSent
+            && !trajectoryPaused && manipulatorState == 0) {
+
+            bool inTol = (abs(ErrPos1) < WAYPOINT_TOL)
+                      && (abs(ErrPos2) < WAYPOINT_TOL)
+                      && (abs(ErrPos3) < WAYPOINT_TOL);
+
+            if (inTol && waypointReachedAt == 0) {
+                waypointReachedAt = now;          // Mulai settle timer
+            } else if (!inTol) {
+                waypointReachedAt = 0;            // Keluar toleransi, reset timer
+            }
+
+            if (waypointReachedAt > 0
+                && (now - waypointReachedAt) >= WAYPOINT_SETTLE_MS) {
+                Serial.println(F("WAYPOINT_REACHED"));
+                waypointAckSent = true;
             }
         }
 
