@@ -72,6 +72,7 @@ int main() {
     std::cout << "\n  SISTEM KONTROL REHABILITASI";
     std::cout << "\n  Multi-Trajectory + Cycle Counter";
     std::cout << "\n  + Admittance Control Support";
+    std::cout << "\n  + Telemetri Arduino -> console mini PC";
     std::cout << "\n  Modular Version";
     std::cout << "\n===========================================" << std::endl;
     

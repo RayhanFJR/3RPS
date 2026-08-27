@@ -219,7 +219,7 @@ void ControlHandler::processArduinoFeedback(std::string& arduinoFeedbackState,
     }
     
     // === CRITICAL: Check for pause/resume signals FIRST ===
-    serialHandler.processArduinoFeedback(resultString);
+    serialHandler.processIncomingData(resultString);
     
     if (resultString.find("RETREAT") != std::string::npos && 
         currentState == SystemState::AUTO_REHAB) {

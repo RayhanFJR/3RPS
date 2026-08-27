@@ -1,6 +1,7 @@
 #include "SerialHandler.h"
 #include "Config.h"
 #include <iostream>
+#include <iomanip>
 #include <sys/ioctl.h>
 #include <termios.h>
 #include <array>
@@ -21,6 +22,7 @@ bool SerialHandler::initialize(const std::string& port, int baudRate) {
         serial.set_option(serial_port_base::baud_rate(baudRate));
         isOpen = true;
         trajectoryPaused = false;
+        lineBuffer.clear();
         return true;
     } catch (const boost::system::system_error& e) {
         std::cerr << "Error membuka port serial: " << e.what() << std::endl;
@@ -34,15 +36,14 @@ void SerialHandler::close() {
         serial.close();
         isOpen = false;
         trajectoryPaused = false;
+        lineBuffer.clear();
     }
 }
 
 void SerialHandler::sendCommand(const std::string& cmd) {
     if (!isOpen) return;
     
-    // CRITICAL: Don't send trajectory commands if paused
     if (trajectoryPaused && (cmd[0] == 'S' || cmd[0] == 'R')) {
-        // Silently ignore trajectory commands during pause
         return;
     }
     
@@ -82,6 +83,7 @@ float SerialHandler::parseValue(const std::string& data, const std::string& key)
 
     size_t value_start = key_pos + key.length();
     size_t value_end = data.find_first_of(",\n\r", value_start);
+    if (value_end == std::string::npos) value_end = data.length();
     
     try {
         return std::stof(data.substr(value_start, value_end - value_start));
@@ -90,19 +92,106 @@ float SerialHandler::parseValue(const std::string& data, const std::string& key)
     }
 }
 
+void SerialHandler::processIncomingData(const std::string& chunk) {
+    lineBuffer += chunk;
+
+    size_t pos = 0;
+    while ((pos = lineBuffer.find('\n')) != std::string::npos) {
+        std::string line = lineBuffer.substr(0, pos);
+        lineBuffer.erase(0, pos + 1);
+
+        if (!line.empty() && line.back() == '\r') {
+            line.pop_back();
+        }
+
+        if (!line.empty()) {
+            processLine(line);
+        }
+    }
+}
+
+void SerialHandler::processLine(const std::string& line) {
+    processArduinoFeedback(line);
+
+    if (ENABLE_TELEMETRY_CONSOLE && line.compare(0, 2, "s:") == 0) {
+        printTelemetryToConsole(line);
+        return;
+    }
+
+    printEventLine(line);
+}
+
+void SerialHandler::printTelemetryToConsole(const std::string& line) {
+    std::string state = "run";
+    size_t s_pos = line.find("s:");
+    size_t m_pos = line.find(",m:");
+    if (s_pos != std::string::npos && m_pos != std::string::npos) {
+        state = line.substr(s_pos + 2, m_pos - (s_pos + 2));
+    }
+
+    std::string mode = "fwd";
+    size_t load_pos = line.find(",load:");
+    if (m_pos != std::string::npos && load_pos != std::string::npos) {
+        mode = line.substr(m_pos + 3, load_pos - (m_pos + 3));
+    }
+
+    float load = parseValue(line, "load:");
+    float yank = parseValue(line, "yank:");
+    float p1   = parseValue(line, "p1:");
+    float p2   = parseValue(line, "p2:");
+    float p3   = parseValue(line, "p3:");
+    float ep1  = parseValue(line, "ep1:");
+    float ep2  = parseValue(line, "ep2:");
+    float ep3  = parseValue(line, "ep3:");
+    float Z    = parseValue(line, "Z:");
+    float K    = parseValue(line, "K:");
+    float B    = parseValue(line, "B:");
+    float tpause = parseValue(line, "tpause:");
+
+    std::cout << std::fixed << std::setprecision(2)
+              << "[TELEM] " << state << "/" << mode
+              << " | load=" << load << " yank=" << yank
+              << " | pos=(" << p1 << "," << p2 << "," << p3 << ")"
+              << " | err=(" << ep1 << "," << ep2 << "," << ep3 << ")";
+
+    if (Z >= 0.0f) {
+        std::cout << " | adm Z=" << Z << " K=" << K << " B=" << B;
+    }
+    if (tpause >= 0.0f) {
+        std::cout << " | tpause=" << static_cast<int>(tpause);
+    }
+    std::cout << std::endl;
+}
+
+void SerialHandler::printEventLine(const std::string& line) {
+    if (line == "READY") {
+        std::cout << "[ARDUINO] Sistem siap (telemetri via mini PC)" << std::endl;
+    }
+    else if (line.find("YANK_PAUSE") != std::string::npos) {
+        std::cout << "[SAFETY] " << line << std::endl;
+    }
+    else if (line.find("System Reset OK") != std::string::npos ||
+             line.find("EMERGENCY_STOP") != std::string::npos ||
+             line.find("ACK_") != std::string::npos ||
+             line.find("Admittance") != std::string::npos ||
+             line.find("Motor ") != std::string::npos ||
+             line.find("ERR:") != std::string::npos) {
+        std::cout << "[ARDUINO] " << line << std::endl;
+    }
+}
+
 void SerialHandler::processArduinoFeedback(const std::string& data) {
-    // Check for pause/resume signals from Arduino
     if (data.find("PAUSE_TRAJECTORY") != std::string::npos) {
         trajectoryPaused = true;
-        std::cout << "[ADMITTANCE] Trajectory PAUSED by Arduino (external force detected)" << std::endl;
+        std::cout << "[ADMITTANCE] Trajectory PAUSED (gaya eksternal terdeteksi)" << std::endl;
     }
     else if (data.find("RESUME_TRAJECTORY") != std::string::npos) {
         trajectoryPaused = false;
-        std::cout << "[ADMITTANCE] Trajectory RESUMED (force released)" << std::endl;
+        std::cout << "[ADMITTANCE] Trajectory RESUMED (gaya dilepas)" << std::endl;
     }
     
-    // Also check for retreat request (existing functionality)
-    if (data.find("RETREAT") != std::string::npos) {
+    if (data.find("RETREAT") != std::string::npos &&
+        data.find("ACK_RETREAT") == std::string::npos) {
         std::cout << "[SAFETY] Retreat requested by Arduino" << std::endl;
     }
-}  
+}

@@ -16,6 +16,9 @@ const int JEDA_KONTROLER_MS = 100;
 const int JEDA_GRAFIK_MS = 100;
 const int POST_REHAB_DELAY_SEC = 5;
 
+// Telemetri: tampilkan di console mini PC (bukan Serial Monitor Arduino)
+const bool ENABLE_TELEMETRY_CONSOLE = true;
+
 // *** KONFIGURASI FILTER GRAFIK HMI (PER TRAJEKTORI) ***
 // Trajektori 1
 const int GRAFIK_START_INDEX_T1 = 1;
