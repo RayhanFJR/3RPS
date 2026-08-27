@@ -74,7 +74,7 @@ SystemState handleAutoRetreatState(ModbusHandler& modbus, SerialHandler& serial,
     if (mb_mapping == nullptr) return SystemState::AUTO_RETREAT;
     
     if (mb_mapping->tab_registers[ModbusAddr::RESET] == 1) {
-        serial.sendCommand("R");
+        serial.sendCommand("X");
         std::cout << "\nSistem di-reset." << std::endl;
         mb_mapping->tab_registers[ModbusAddr::RESET] = 0;
         arduinoFeedbackState = "running";
@@ -106,25 +106,23 @@ SystemState handlePostRehabDelay(std::chrono::steady_clock::time_point& delaySta
             return SystemState::AUTO_REHAB;
         } 
         else {
-            // All cycles completed - automatically trigger manual retreat
+            // Semua cycle selesai — aktifkan retreat penuh ke titik awal gait
             std::cout << "\n=== SEMUA CYCLE SELESAI ===" << std::endl;
             std::cout << "Total cycle completed: " << current_cycle << std::endl;
-            std::cout << "Kembali ke posisi awal... Kembali ke IDLE" << std::endl;
-            
-            control.resetCycle();
-            t_controller = 0;
-            t_grafik = 0;
+            std::cout << "Memulai retreat otomatis ke posisi awal..." << std::endl;
+
             animasi_grafik = false;
-            
+
             modbus_mapping_t* mb_mapping = modbus.getMapping();
             if (mb_mapping != nullptr) {
                 mb_mapping->tab_registers[ModbusAddr::COMMAND_REG] = 0;
                 mb_mapping->tab_registers[ModbusAddr::START] = 0;
             }
-            
-            serial.sendCommand("2");
-            
-            return SystemState::IDLE;
+
+            control.startAutoReturnToZero(t_controller);
+            lastTraTime = std::chrono::steady_clock::now();
+
+            return SystemState::AUTO_RETREAT;
         }
     }
     return SystemState::POST_REHAB_DELAY;

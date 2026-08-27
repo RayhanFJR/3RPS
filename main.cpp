@@ -98,7 +98,7 @@ int main() {
             if (mb_mapping->tab_registers[ModbusAddr::RESET] == 1 && 
                 currentState == SystemState::EMERGENCY_STOP) {
                 currentState = SystemState::RESETTING;
-                serialHandler.sendCommand("R");
+                serialHandler.sendCommand("X");
                 std::cout << "\nSistem di-reset dari Emergency Stop." << std::endl;
                 mb_mapping->tab_registers[ModbusAddr::RESET] = 0;
             }
@@ -153,10 +153,13 @@ int main() {
         }
         
         // === Process retreat sequence ===
-        // CRITICAL FIX: Retreat sequence harus dipanggil setiap loop, bukan hanya saat modbus query
         if (currentState == SystemState::AUTO_RETREAT) {
             if (controlHandler.isRetreatActive()) {
                 controlHandler.processRetreatSequence(lastTraTime);
+            } else if (controlHandler.isAutoReturnToIdlePending()) {
+                controlHandler.completeAutoReturnToIdle();
+                currentState = SystemState::IDLE;
+                messageSend = false;
             }
         }
         

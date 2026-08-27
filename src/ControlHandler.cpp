@@ -10,7 +10,7 @@ ControlHandler::ControlHandler(ModbusHandler& modbus, SerialHandler& serial,
     : modbusHandler(modbus), serialHandler(serial), 
       trajectoryManager(trajectory), graphManager(graph),
       target_cycle(1), current_cycle(0),
-      retreatIndex(0), retreatActive(false), lastForwardIndex(0),
+      retreatIndex(0), retreatTargetIndex(0), retreatActive(false), lastForwardIndex(0),
       autoReturnToIdle(false) {
     initLogger();
 }
@@ -152,8 +152,8 @@ void ControlHandler::completeAutoReturnToIdle() {
     serialHandler.sendCommand("0");
     resetCycle();
     autoReturnToIdle = false;
-    
-    std::cout << "\nPosisi telah kembali ke titik awal. Sistem masuk IDLE.\n" << std::endl;
+
+    std::cout << "\nRetreat selesai. Sistem masuk IDLE.\n" << std::endl;
 }
 
 void ControlHandler::updateThresholds(int& last_thresh1, int& last_thresh2) {
@@ -221,26 +221,12 @@ void ControlHandler::processArduinoFeedback(std::string& arduinoFeedbackState,
     // === CRITICAL: Check for pause/resume signals FIRST ===
     serialHandler.processIncomingData(resultString);
     
-    // === CRITICAL: Deteksi kondisi retreat ===
-    // Retreat bisa dipicu oleh 2 sumber dari Arduino:
-    //   1. Pesan "RETREAT" eksplisit (legacy/manual)
-    //   2. Pesan "YANK_PAUSE" — spike beban terdeteksi → harus retreat
-    bool retreatTriggered = false;
-
-    if (resultString.find("YANK_PAUSE") != std::string::npos &&
-        currentState == SystemState::AUTO_REHAB) {
-        std::cout << "\n!!! YANK SPIKE DETECTED — TRIGGERING RETREAT !!!" << std::endl;
-        retreatTriggered = true;
-    }
-
+    // === Deteksi retreat eksplisit dari Arduino (bukan YANK_PAUSE) ===
     if (resultString.find("RETREAT") != std::string::npos &&
         resultString.find("ACK_RETREAT") == std::string::npos &&
+        resultString.find("YANK_PAUSE") == std::string::npos &&
         currentState == SystemState::AUTO_REHAB) {
         std::cout << "\n!!! RETREAT COMMAND RECEIVED !!!" << std::endl;
-        retreatTriggered = true;
-    }
-
-    if (retreatTriggered) {
         int retreatStartIndex = clampRetreatIndex(t_controller);
         startRetreatSequence(retreatStartIndex);
         currentState = SystemState::AUTO_RETREAT;
@@ -287,24 +273,24 @@ void ControlHandler::startRetreatSequence(int currentIndex) {
     retreatActive = true;
     retreatIndex = currentIndex - 1;
     lastForwardIndex = currentIndex;
-    
-    // Reset admittance pause — robot harus bisa mundur bebas dari gaya eksternal
+    retreatTargetIndex = trajectoryManager.getGaitStartIndex();
+
+    // Reset admittance pause — retreat harus jalan sampai titik awal gait
     serialHandler.resetPauseState();
-    
+
     std::cout << "\n=== RETREAT SEQUENCE STARTED ===" << std::endl;
-    std::cout << "Starting from index: " << retreatIndex << std::endl;
+    std::cout << "From index: " << retreatIndex
+              << " → target: " << retreatTargetIndex << std::endl;
 }
 
 void ControlHandler::processRetreatSequence(std::chrono::steady_clock::time_point& lastTraTime) {
     auto currentTime = std::chrono::steady_clock::now();
-    
-    if (retreatIndex >= 0) {
-        // FIX: Kirim data retreat pertama langsung tanpa delay
-        // Data berikutnya tetap dengan delay normal (100ms)
+
+    if (retreatIndex >= retreatTargetIndex) {
         bool isFirstRetreatData = (retreatIndex == lastForwardIndex - 1);
-        bool shouldSend = isFirstRetreatData || 
+        bool shouldSend = isFirstRetreatData ||
                          ((currentTime - lastTraTime) >= std::chrono::milliseconds(JEDA_KONTROLER_MS));
-        
+
         if (shouldSend) {
             sendRetreatData(retreatIndex);
             retreatIndex--;
@@ -312,9 +298,10 @@ void ControlHandler::processRetreatSequence(std::chrono::steady_clock::time_poin
         }
     } else {
         serialHandler.sendCommand("RETREAT_COMPLETE");
-        serialHandler.sendCommand("2");
         retreatActive = false;
         std::cout << "\n=== RETREAT SEQUENCE COMPLETED ===" << std::endl;
+        std::cout << "Robot kembali ke titik awal gait (index "
+                  << retreatTargetIndex << ")" << std::endl;
     }
 }
 

@@ -75,6 +75,7 @@ private:
     
     // Retreat control
     int retreatIndex;
+    int retreatTargetIndex;
     bool retreatActive;
     int lastForwardIndex;
     bool autoReturnToIdle;

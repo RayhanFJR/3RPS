@@ -172,8 +172,11 @@ void SerialHandler::printEventLine(const std::string& line) {
     else if (line.find("YANK_PAUSE") != std::string::npos) {
         std::cout << "[SAFETY] " << line << std::endl;
     }
-    else if (line.find("System Reset OK") != std::string::npos ||
-             line.find("EMERGENCY_STOP") != std::string::npos ||
+    else if (line.find("HOST_TIMEOUT") != std::string::npos) {
+        std::cout << "[SAFETY] Host timeout — motor di-stop Arduino (bukan emergency HMI)" << std::endl;
+    }
+    else if (line.find("EMERGENCY_STOP") != std::string::npos ||
+             line.find("System Reset OK") != std::string::npos ||
              line.find("ACK_") != std::string::npos ||
              line.find("Admittance") != std::string::npos ||
              line.find("Motor ") != std::string::npos ||
