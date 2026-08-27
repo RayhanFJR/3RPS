@@ -115,7 +115,7 @@ long  waypointReachedAt = 0;       // Kapan pertama kali masuk toleransi
 // ============================================================
 const float LOAD_MAX          = 100.0;
 const float LOAD_ALPHA        = 0.3;    // EMA smoothing factor
-const float LOAD_SCALE_MIN    = 0.15;
+const float LOAD_SCALE_MIN    = 0.15;   
 const float LOAD_SCALE_MAX    = 1.0;
 const float KP_DAMPING_FACTOR = 0.6;
 const bool  ENABLE_ADAPTIVE_MANUAL = true;
@@ -246,10 +246,7 @@ long lastSerialRxTime   = 0;   // Watchdog: last time any serial byte was receiv
 //  Leonardo USB CDC: Serial == false saat host disconnect
 //  Jika tidak ada data masuk > SERIAL_TIMEOUT_MS → emergency stop
 // ============================================================
-const long SERIAL_TIMEOUT_MS = 10000;  // 10 detik tanpa data = host mati
-                                        // Dinaikkan dari 3s karena ACK-based system:
-                                        // motor bisa butuh > 3s untuk reach waypoint
-                                        // USB disconnect detection (Serial==false) tetap jadi safety utama
+const long SERIAL_TIMEOUT_MS = 3000;   // 3 detik tanpa data = host mati
 bool hostWasConnected = false;          // Track state untuk edge detection
 
 // ============================================================
@@ -407,8 +404,7 @@ void parseTrajectoryCommand(String data, bool isRetreat) {
         data    = data.substring(comma + 1);
     }
 
-    // Saat pause admittance: block forward (S), tetap terima retreat (R)
-    if (trajectoryPaused && !isRetreat) return;
+    if (trajectoryPaused) return;   // Ignore new commands while paused
 
     refPos1 = vals[0]; refPos2 = vals[1]; refPos3 = vals[2];
     refVelo1 = vals[3]; refVelo2 = vals[4]; refVelo3 = vals[5];
@@ -524,13 +520,8 @@ void resetSystem() {
 void emergencyStop() {
     operatingMode           = 0;
     manualCommand           = 0;
-    manipulatorState        = 0;
     retreatHasBeenTriggered = false;
     retreatRequestSent      = false;
-    trajectoryPaused        = false;
-    yankPauseUntil          = 0;
-    yankDebounceCount       = 0;
-    resetWaypointState();
     stopAllMotors();
     Serial.println("EMERGENCY_STOP");
 }
@@ -649,10 +640,7 @@ void applyMotorControl() {
 
 void sendTelemetry() {
     Serial.print(F("s:")); Serial.print(manipulatorState == 0 ? "run" : "pause");
-    Serial.print(F(",m:"));
-    if      (operatingMode == 1) Serial.print(F("fwd"));
-    else if (operatingMode == 2) Serial.print(F("ret"));
-    else                         Serial.print(F("idl"));
+    Serial.print(F(",m:")); Serial.print(operatingMode == 1 ? "fwd" : "ret");
     Serial.print(F(",load:")); Serial.print(latestValidLoad, 2);
     Serial.print(F(",yank:")); Serial.print(yank, 2);
     Serial.print(F(",ythr:")); Serial.print(THRESHOLD_YANK, 1);
@@ -772,18 +760,13 @@ void loop() {
     //  WATCHDOG — Timeout jika host tiba-tiba tidak kirim data
     //  (fallback kalau USB tidak terdeteksi disconnect)
     // ----------------------------------------------------------
-    // Watchdog: jangan trigger saat pause admittance/yank (host sengaja tidak kirim S)
     if (lastSerialRxTime > 0 &&
         (now - lastSerialRxTime) > SERIAL_TIMEOUT_MS &&
-        isAutoMotion() &&
-        !trajectoryPaused &&
-        manipulatorState == 0) {
+        (operatingMode != 0 || manualCommand != 0)) {
         stopAllMotors();
-        operatingMode    = 0;
-        manualCommand    = 0;
-        resetWaypointState();
-        lastSerialRxTime = now;
-        Serial.println(F("HOST_TIMEOUT"));
+        operatingMode = 0;
+        manualCommand = 0;
+        lastSerialRxTime = now;   // Reset agar tidak trigger berulang
     }
 
     // ----------------------------------------------------------
@@ -952,15 +935,15 @@ void loop() {
                 Zdot_adm    = 0.0;
             }
 
-            // Trajectory pause/resume dengan hysteresis (forward saja, retreat tetap jalan)
-            if (operatingMode == 1 && load > FORCE_PAUSE_THRESHOLD && !trajectoryPaused) {
+            // Trajectory pause/resume dengan hysteresis
+            if (load > FORCE_PAUSE_THRESHOLD && !trajectoryPaused) {
                 trajectoryPaused = true;
                 pausedRefPos1  = refPos1;  pausedRefPos2  = refPos2;  pausedRefPos3  = refPos3;
                 pausedRefVelo1 = refVelo1; pausedRefVelo2 = refVelo2; pausedRefVelo3 = refVelo3;
                 pausedRefFc1   = refFc1;   pausedRefFc2   = refFc2;   pausedRefFc3   = refFc3;
                 Serial.println(F("PAUSE_TRAJECTORY"));
             }
-            else if (operatingMode == 1 && load <= FORCE_RESUME_THRESHOLD && trajectoryPaused) {
+            else if (load <= FORCE_RESUME_THRESHOLD && trajectoryPaused) {
                 trajectoryPaused  = false;
                 waypointReachedAt = 0;   // Harus settle ulang sebelum kirim ACK
                 waypointAckSent   = false;
@@ -1019,13 +1002,7 @@ void loop() {
 
             if (waypointReachedAt > 0
                 && (now - waypointReachedAt) >= WAYPOINT_SETTLE_MS) {
-                // Bedakan pesan forward vs retreat agar tidak ada false trigger
-                // di mini PC akibat pesan WAYPOINT_REACHED lama yang numpuk di buffer
-                if (operatingMode == 2) {
-                    Serial.println(F("WAYPOINT_REACHED_R"));   // Retreat: robot sudah di posisi home
-                } else {
-                    Serial.println(F("WAYPOINT_REACHED"));     // Forward: titik trajektori tercapai
-                }
+                Serial.println(F("WAYPOINT_REACHED"));
                 waypointAckSent = true;
             }
         }
