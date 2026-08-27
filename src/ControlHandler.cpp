@@ -13,6 +13,7 @@ ControlHandler::ControlHandler(ModbusHandler& modbus, SerialHandler& serial,
       retreatIndex(0), retreatTargetIndex(0), retreatActive(false), lastForwardIndex(0),
       autoReturnToIdle(false),
       waitingForWaypoint(false), rampUpPhase(false), rampUpIndex(0) {
+    lastWaypointSentTime = std::chrono::steady_clock::now();
     initLogger();
 }
 
@@ -367,9 +368,23 @@ void ControlHandler::processAutoRehab(SystemState& currentState, int& t_controll
         return;  // Trajectory frozen — jangan kirim apapun
     }
     
-    // === ACK-BASED: Hanya kirim titik berikutnya jika Arduino sudah ACK titik sebelumnya ===
+    // === ACK-BASED + TIMEOUT FALLBACK ===
+    // Tunggu WAYPOINT_REACHED dari Arduino.
+    // Jika dalam WAYPOINT_ACK_TIMEOUT_MS tidak ada ACK, paksa lanjut ke titik berikutnya.
+    static const int WAYPOINT_ACK_TIMEOUT_MS = 3000;  // 3 detik timeout
+    
     if (waitingForWaypoint) {
-        return;  // Masih menunggu WAYPOINT_REACHED dari Arduino
+        auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - lastWaypointSentTime).count();
+        
+        if (elapsed < WAYPOINT_ACK_TIMEOUT_MS) {
+            return;  // Masih dalam window ACK, tunggu dulu
+        }
+        
+        // Timeout! Motor tidak sampai dalam 3 detik — paksa lanjut
+        std::cout << "[TIMEOUT] Waypoint ACK timeout (" << elapsed
+                  << "ms) — paksa lanjut ke titik berikutnya" << std::endl;
+        waitingForWaypoint = false;  // Force advance
     }
     
     int grafik_start = trajectoryManager.getGraphStartIndex();
@@ -388,9 +403,10 @@ void ControlHandler::processAutoRehab(SystemState& currentState, int& t_controll
                 t_grafik = rampUpIndex;
             }
             
-            // Kirim waypoint ramp-up dan tunggu ACK
+            // Kirim waypoint ramp-up dan tunggu ACK (dengan timeout fallback)
             sendControllerData(rampUpIndex);
             waitingForWaypoint = true;
+            lastWaypointSentTime = std::chrono::steady_clock::now();
             rampUpIndex++;
             lastTraTime = std::chrono::steady_clock::now();
         } else {
@@ -415,9 +431,10 @@ void ControlHandler::processAutoRehab(SystemState& currentState, int& t_controll
             animasi_grafik = true;
         }
         
-        // Kirim waypoint dan tunggu ACK sebelum advance
+        // Kirim waypoint dan set timer ACK
         sendControllerData(actual_index);
         waitingForWaypoint = true;
+        lastWaypointSentTime = std::chrono::steady_clock::now();
         t_controller++;
         lastTraTime = std::chrono::steady_clock::now();
     } else {
