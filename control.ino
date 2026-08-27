@@ -711,94 +711,95 @@ void loop() {
             char c = Serial.read();
             receivedData += c;
 
-        if (c == '\n') {
-            receivedData.trim();
+            if (c == '\n') {
+                receivedData.trim();
 
-            // --- Trajectory commands ---
-            if (receivedData.startsWith("S")) {
-                operatingMode           = 1;
-                retreatHasBeenTriggered = false;
-                retreatRequestSent      = false;
-                manipulatorState        = 0;
-                parseTrajectoryCommand(receivedData, false);
-            }
-            else if (receivedData.startsWith("R") && receivedData.indexOf(',') > 0) {
-                operatingMode    = 2;
-                manipulatorState = 0;
-                parseTrajectoryCommand(receivedData, true);
-            }
-            else if (receivedData == "RETREAT_COMPLETE") {
-                operatingMode           = 0;
-                manualCommand           = 0;
-                retreatHasBeenTriggered = false;
-                retreatRequestSent      = false;
-                stopAllMotors();
-                Serial.println("ACK_RETREAT_COMPLETE");
-            }
+                // --- Trajectory commands ---
+                if (receivedData.startsWith("S")) {
+                    operatingMode           = 1;
+                    retreatHasBeenTriggered = false;
+                    retreatRequestSent      = false;
+                    manipulatorState        = 0;
+                    parseTrajectoryCommand(receivedData, false);
+                }
+                else if (receivedData.startsWith("R") && receivedData.indexOf(',') > 0) {
+                    operatingMode    = 2;
+                    manipulatorState = 0;
+                    parseTrajectoryCommand(receivedData, true);
+                }
+                else if (receivedData == "RETREAT_COMPLETE") {
+                    operatingMode           = 0;
+                    manualCommand           = 0;
+                    retreatHasBeenTriggered = false;
+                    retreatRequestSent      = false;
+                    stopAllMotors();
+                    Serial.println("ACK_RETREAT_COMPLETE");
+                }
 
-            // --- System commands ---
-            else if (receivedData.startsWith("X")) { resetSystem(); }
-            else if (receivedData.startsWith("E")) { emergencyStop(); }
+                // --- System commands ---
+                else if (receivedData.startsWith("X")) { resetSystem(); }
+                else if (receivedData.startsWith("E")) { emergencyStop(); }
 
-            // --- Manual mode ---
-            else if (receivedData == "1") {
-                operatingMode = 0; manualCommand = 1;
-                retreatHasBeenTriggered = false; retreatRequestSent = false;
-            }
-            else if (receivedData == "2") {
-                operatingMode = 0; manualCommand = 2;
-                retreatHasBeenTriggered = false; retreatRequestSent = false;
-            }
-            else if (receivedData == "0") {
-                operatingMode = 0; manualCommand = 0;
-            }
+                // --- Manual mode ---
+                else if (receivedData == "1") {
+                    operatingMode = 0; manualCommand = 1;
+                    retreatHasBeenTriggered = false; retreatRequestSent = false;
+                }
+                else if (receivedData == "2") {
+                    operatingMode = 0; manualCommand = 2;
+                    retreatHasBeenTriggered = false; retreatRequestSent = false;
+                }
+                else if (receivedData == "0") {
+                    operatingMode = 0; manualCommand = 0;
+                }
 
-            // --- Gain tuning ---
-            else if (receivedData.startsWith("K")) {
-                operatingMode = 0; manualCommand = 0;
-                parseOuterLoopGains(receivedData);
-            }
-            else if (receivedData.startsWith("P")) {
-                operatingMode = 0; manualCommand = 0;
-                parseInnerLoopGains(receivedData);
-            }
+                // --- Gain tuning ---
+                else if (receivedData.startsWith("K")) {
+                    operatingMode = 0; manualCommand = 0;
+                    parseOuterLoopGains(receivedData);
+                }
+                else if (receivedData.startsWith("P")) {
+                    operatingMode = 0; manualCommand = 0;
+                    parseInnerLoopGains(receivedData);
+                }
 
-            // --- Admittance commands ---
-            else if (receivedData == "ADMITTANCE_ON") {
-                admittanceEnabled = true;
-                Serial.println("Admittance ON");
-            }
-            else if (receivedData == "ADMITTANCE_OFF") {
-                admittanceEnabled = false;
-                Serial.println("Admittance OFF");
-            }
-            else if (receivedData == "ADMITTANCE_RESET") {
-                resetAdmittance();
-                Serial.println("Admittance RESET");
-            }
-            else if (receivedData.startsWith("ADM") && receivedData.indexOf(',') > 0) {
-                parseAdmittanceParams(receivedData);
-            }
-            else if (receivedData == "ADMITTANCE_STATUS") {
-                Serial.println(F("\n=== Admittance Status ==="));
-                Serial.print(F("Enabled    : ")); Serial.println(admittanceEnabled ? "YES" : "NO");
-                Serial.print(F("Activation : ")); Serial.println(currentActivation, 4);
-                Serial.print(F("K_adm      : ")); Serial.print(currentK, 2); Serial.println(F(" N/m"));
-                Serial.print(F("B_adm      : ")); Serial.print(currentB, 2); Serial.println(F(" N.s/m"));
-                Serial.print(F("tau (B/K)  : ")); Serial.print(currentB / currentK, 4); Serial.println(F(" s"));
-                Serial.print(F("Z_adm      : ")); Serial.print(Z_adm * 1000, 4); Serial.println(F(" mm"));
-                Serial.print(F("Zdot_adm   : ")); Serial.print(Zdot_adm * 1000, 4); Serial.println(F(" mm/s"));
-                Serial.print(F("F_ext      : ")); Serial.print(latestValidLoad, 2); Serial.println(F(" unit"));
-                Serial.print(F("Yank       : ")); Serial.print(yank, 2); Serial.println(F(" unit/s"));
-                Serial.print(F("Yank thresh: ")); Serial.print(THRESHOLD_YANK, 1); Serial.println(F(" unit/s"));
-                Serial.println(F("=========================\n"));
-            }
+                // --- Admittance commands ---
+                else if (receivedData == "ADMITTANCE_ON") {
+                    admittanceEnabled = true;
+                    Serial.println("Admittance ON");
+                }
+                else if (receivedData == "ADMITTANCE_OFF") {
+                    admittanceEnabled = false;
+                    Serial.println("Admittance OFF");
+                }
+                else if (receivedData == "ADMITTANCE_RESET") {
+                    resetAdmittance();
+                    Serial.println("Admittance RESET");
+                }
+                else if (receivedData.startsWith("ADM") && receivedData.indexOf(',') > 0) {
+                    parseAdmittanceParams(receivedData);
+                }
+                else if (receivedData == "ADMITTANCE_STATUS") {
+                    Serial.println(F("\n=== Admittance Status ==="));
+                    Serial.print(F("Enabled    : ")); Serial.println(admittanceEnabled ? "YES" : "NO");
+                    Serial.print(F("Activation : ")); Serial.println(currentActivation, 4);
+                    Serial.print(F("K_adm      : ")); Serial.print(currentK, 2); Serial.println(F(" N/m"));
+                    Serial.print(F("B_adm      : ")); Serial.print(currentB, 2); Serial.println(F(" N.s/m"));
+                    Serial.print(F("tau (B/K)  : ")); Serial.print(currentB / currentK, 4); Serial.println(F(" s"));
+                    Serial.print(F("Z_adm      : ")); Serial.print(Z_adm * 1000, 4); Serial.println(F(" mm"));
+                    Serial.print(F("Zdot_adm   : ")); Serial.print(Zdot_adm * 1000, 4); Serial.println(F(" mm/s"));
+                    Serial.print(F("F_ext      : ")); Serial.print(latestValidLoad, 2); Serial.println(F(" unit"));
+                    Serial.print(F("Yank       : ")); Serial.print(yank, 2); Serial.println(F(" unit/s"));
+                    Serial.print(F("Yank thresh: ")); Serial.print(THRESHOLD_YANK, 1); Serial.println(F(" unit/s"));
+                    Serial.println(F("=========================\n"));
+                }
 
-            else {
-                Serial.print(F("ERR: Unknown command -> ")); Serial.println(receivedData);
-            }
+                else {
+                    Serial.print(F("ERR: Unknown command -> ")); Serial.println(receivedData);
+                }
 
-            receivedData = "";
+                receivedData = "";
+            }
         }
     }
 
