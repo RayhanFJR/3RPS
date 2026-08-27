@@ -90,7 +90,7 @@ float latestValidLoad = 0.0;
 //  yank = (F_k - F_{k-1}) / Ts,  Ts = 0.1 s
 //  |yank| > THRESHOLD_YANK (N kali berturut) → trigger pause
 // ============================================================
-const float THRESHOLD_YANK     = 70.0;   // unit/s — dinaikkan dari 30 agar tidak terlalu sensitif
+const float THRESHOLD_YANK     = 55.0;   // unit/s — dinaikkan dari 30 agar tidak terlalu sensitif
 const int   YANK_PAUSE_MS      = 400;    // Jeda singkat saat spike (bukan full retreat)
 const int   YANK_DEBOUNCE_REQ  = 3;     // Harus N kali berturut-turut sebelum trigger
 
