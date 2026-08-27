@@ -221,9 +221,26 @@ void ControlHandler::processArduinoFeedback(std::string& arduinoFeedbackState,
     // === CRITICAL: Check for pause/resume signals FIRST ===
     serialHandler.processIncomingData(resultString);
     
-    if (resultString.find("RETREAT") != std::string::npos && 
+    // === CRITICAL: Deteksi kondisi retreat ===
+    // Retreat bisa dipicu oleh 2 sumber dari Arduino:
+    //   1. Pesan "RETREAT" eksplisit (legacy/manual)
+    //   2. Pesan "YANK_PAUSE" — spike beban terdeteksi → harus retreat
+    bool retreatTriggered = false;
+
+    if (resultString.find("YANK_PAUSE") != std::string::npos &&
+        currentState == SystemState::AUTO_REHAB) {
+        std::cout << "\n!!! YANK SPIKE DETECTED — TRIGGERING RETREAT !!!" << std::endl;
+        retreatTriggered = true;
+    }
+
+    if (resultString.find("RETREAT") != std::string::npos &&
+        resultString.find("ACK_RETREAT") == std::string::npos &&
         currentState == SystemState::AUTO_REHAB) {
         std::cout << "\n!!! RETREAT COMMAND RECEIVED !!!" << std::endl;
+        retreatTriggered = true;
+    }
+
+    if (retreatTriggered) {
         int retreatStartIndex = clampRetreatIndex(t_controller);
         startRetreatSequence(retreatStartIndex);
         currentState = SystemState::AUTO_RETREAT;
@@ -270,6 +287,9 @@ void ControlHandler::startRetreatSequence(int currentIndex) {
     retreatActive = true;
     retreatIndex = currentIndex - 1;
     lastForwardIndex = currentIndex;
+    
+    // Reset admittance pause — robot harus bisa mundur bebas dari gaya eksternal
+    serialHandler.resetPauseState();
     
     std::cout << "\n=== RETREAT SEQUENCE STARTED ===" << std::endl;
     std::cout << "Starting from index: " << retreatIndex << std::endl;

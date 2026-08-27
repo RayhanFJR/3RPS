@@ -43,7 +43,9 @@ void SerialHandler::close() {
 void SerialHandler::sendCommand(const std::string& cmd) {
     if (!isOpen) return;
     
-    if (trajectoryPaused && (cmd[0] == 'S' || cmd[0] == 'R')) {
+    // Saat trajectory paused (admittance), hanya block forward command (S...)
+    // Retreat command (R...) HARUS tetap lolos — robot harus bisa mundur dari bahaya
+    if (trajectoryPaused && cmd[0] == 'S') {
         return;
     }
     
