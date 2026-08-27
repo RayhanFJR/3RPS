@@ -139,18 +139,16 @@ int main() {
         // ControlHandler will handle BOTH load cell AND pause/resume signals
         controlHandler.processArduinoFeedback(arduinoFeedbackState, currentState, t_controller);
         
-        // === Process auto rehab with pause awareness ===
+        // === Process auto rehab (ACK-based, pause-aware) ===
         if (currentState == SystemState::AUTO_REHAB) {
-            // Only advance trajectory if NOT paused by admittance control
-            if (!serialHandler.isTrajectoryPaused()) {
-                controlHandler.processAutoRehab(currentState, t_controller, t_grafik,
-                                              animasi_grafik_berjalan, lastTraTime, delayStartTime);
-            } else {
-                // Trajectory is paused - do nothing, stay at current t_controller
-                // This prevents the "catching up" behavior when force is released
-                // NOTE: t_controller stays frozen, so when resumed, it continues smoothly
-            }
+            // processAutoRehab menangani:
+            // - Cek admittance pause secara internal
+            // - Tunggu WAYPOINT_REACHED (ACK-based) sebelum advance
+            // - Fase ramp-up sebelum gait utama
+            controlHandler.processAutoRehab(currentState, t_controller, t_grafik,
+                                          animasi_grafik_berjalan, lastTraTime, delayStartTime);
         }
+
         
         // === Process retreat sequence ===
         if (currentState == SystemState::AUTO_RETREAT) {

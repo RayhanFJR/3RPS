@@ -23,14 +23,14 @@ const bool ENABLE_TELEMETRY_CONSOLE = true;
 // Trajektori 1
 const int GRAFIK_START_INDEX_T1 = 1;
 const int GRAFIK_END_INDEX_T1 = 816;
-const int GAIT_START_INDEX_T1 = 101;
+const int GAIT_START_INDEX_T1 = 1;
 const int GAIT_END_INDEX_T1 = 715;
 
 // Trajektori 2
 const int GRAFIK_START_INDEX_T2 = 1;
 const int GRAFIK_END_INDEX_T2 = 1370;
-const int GAIT_START_INDEX_T2 = 278;
-const int GAIT_END_INDEX_T2 = 1177;
+const int GAIT_START_INDEX_T2 = 1;
+const int GAIT_END_INDEX_T2 = 1370;
 
 // Trajektori 3
 const int GRAFIK_START_INDEX_T3 = 1;

@@ -11,7 +11,8 @@ ControlHandler::ControlHandler(ModbusHandler& modbus, SerialHandler& serial,
       trajectoryManager(trajectory), graphManager(graph),
       target_cycle(1), current_cycle(0),
       retreatIndex(0), retreatTargetIndex(0), retreatActive(false), lastForwardIndex(0),
-      autoReturnToIdle(false) {
+      autoReturnToIdle(false),
+      waitingForWaypoint(false), rampUpPhase(false), rampUpIndex(0) {
     initLogger();
 }
 
@@ -90,6 +91,19 @@ void ControlHandler::startRehabCycle(bool& animasi_grafik, int& t_controller, in
     retreatIndex = 0;
     lastForwardIndex = 0;
     
+    // Setup ramp-up phase: traversal dari graphStart → gaitStart sebelum gait utama
+    // Ini mencegah motor "loncat" dari posisi home ke titik gait pertama
+    if (gait_start > grafik_start) {
+        rampUpPhase = true;
+        rampUpIndex = grafik_start;
+        std::cout << "Fase ramp-up aktif: index " << grafik_start
+                  << " -> " << (gait_start - 1) << std::endl;
+    } else {
+        rampUpPhase = false;
+        rampUpIndex = 0;
+    }
+    waitingForWaypoint = false;  // Siap kirim titik pertama
+    
     // Reset pause state saat start
     serialHandler.resetPauseState();
     
@@ -98,6 +112,7 @@ void ControlHandler::startRehabCycle(bool& animasi_grafik, int& t_controller, in
     
     mb_mapping->tab_registers[ModbusAddr::START] = 0;
 }
+
 
 void ControlHandler::advanceToNextCycle(bool& animasi_grafik, int& t_controller, int& t_grafik) {
     if (current_cycle < target_cycle) {
@@ -125,6 +140,18 @@ void ControlHandler::advanceToNextCycle(bool& animasi_grafik, int& t_controller,
     
     // Reset pause state untuk cycle baru
     serialHandler.resetPauseState();
+    
+    // Setup ramp-up phase untuk cycle baru (robot balik ke home via retreat sebelumnya)
+    if (gait_start > grafik_start) {
+        rampUpPhase = true;
+        rampUpIndex = grafik_start;
+        std::cout << "Fase ramp-up aktif untuk cycle baru: index " << grafik_start
+                  << " -> " << (gait_start - 1) << std::endl;
+    } else {
+        rampUpPhase = false;
+        rampUpIndex = 0;
+    }
+    waitingForWaypoint = false;  // Siap kirim titik pertama cycle baru
 }
 
 int ControlHandler::clampRetreatIndex(int controllerSteps) const {
@@ -226,13 +253,24 @@ void ControlHandler::processArduinoFeedback(std::string& arduinoFeedbackState,
     // === CRITICAL: Check for pause/resume signals FIRST ===
     serialHandler.processIncomingData(resultString);
     
-    // === WAYPOINT_REACHED saat AUTO_RETREAT → retreat selesai ===
-    if (resultString.find("WAYPOINT_REACHED") != std::string::npos &&
+    // === WAYPOINT_REACHED_R saat AUTO_RETREAT → retreat selesai ===
+    // Pakai pesan khusus _R agar tidak tertukar dengan WAYPOINT_REACHED
+    // dari forward trajectory yang mungkin masih numpuk di serial buffer
+    if (resultString.find("WAYPOINT_REACHED_R") != std::string::npos &&
         currentState == SystemState::AUTO_RETREAT) {
         serialHandler.sendCommand("RETREAT_COMPLETE");
         serialHandler.sendCommand("0");
         retreatActive = false;
         std::cout << "\n=== HOME POSITION REACHED - RETREAT COMPLETE ===" << std::endl;
+    }
+
+    // === WAYPOINT_REACHED saat AUTO_REHAB → kirim titik trajektori berikutnya ===
+    // ACK-based: Arduino konfirmasi motor sudah sampai sebelum mini PC kirim titik berikutnya
+    if (resultString.find("WAYPOINT_REACHED") != std::string::npos &&
+        resultString.find("WAYPOINT_REACHED_R") == std::string::npos &&
+        (currentState == SystemState::AUTO_REHAB)) {
+        notifyWaypointReached();
+        std::cout << "[ACK] WAYPOINT_REACHED - kirim titik berikutnya" << std::endl;
     }
 
     // === Deteksi retreat dari Arduino (YANK_PAUSE atau eksplisit RETREAT) ===
@@ -325,48 +363,73 @@ void ControlHandler::processAutoRehab(SystemState& currentState, int& t_controll
                                       bool& animasi_grafik,
                                       std::chrono::steady_clock::time_point& lastTraTime,
                                       std::chrono::steady_clock::time_point& delayStartTime) {
-    auto currentTime = std::chrono::steady_clock::now();
-    
     // === CRITICAL: Check if trajectory is paused by admittance control ===
     if (serialHandler.isTrajectoryPaused()) {
-        // Trajectory is paused - DO NOT send new commands
-        // DO NOT increment t_controller
-        // This keeps the trajectory frozen at current position
-        return;  // Exit early, everything stays frozen
+        return;  // Trajectory frozen — jangan kirim apapun
     }
     
-    if ((currentTime - lastTraTime) >= std::chrono::milliseconds(JEDA_KONTROLER_MS)) {
-        std::string arduinoFeedbackState = "running"; // Should be passed as parameter
+    // === ACK-BASED: Hanya kirim titik berikutnya jika Arduino sudah ACK titik sebelumnya ===
+    if (waitingForWaypoint) {
+        return;  // Masih menunggu WAYPOINT_REACHED dari Arduino
+    }
+    
+    int grafik_start = trajectoryManager.getGraphStartIndex();
+    int grafik_end   = trajectoryManager.getGraphEndIndex();
+    
+    // === FASE RAMP-UP: traversal index grafik_start → gaitStart - 1 ===
+    // Ini memastikan robot tidak "loncat" dari posisi home ke gait pertama
+    if (rampUpPhase) {
+        int gait_start = trajectoryManager.getGaitStartIndex();
         
-        if (arduinoFeedbackState == "running") {
-            int jumlah_titik_gait = trajectoryManager.getGaitPointCount();
-            if (t_controller < jumlah_titik_gait) {
-                int actual_index = trajectoryManager.getGaitStartIndex() + t_controller;
-                
-                // Sinkronkan t_grafik dengan actual_index controller
-                t_grafik = actual_index;
-                
-                // Update grafik animasi SETIAP KALI controller mengirim data untuk sinkronisasi yang tepat
-                // Pastikan grafik selalu diupdate selama dalam range grafik
-                int grafik_start = trajectoryManager.getGraphStartIndex();
-                int grafik_end = trajectoryManager.getGraphEndIndex();
-                if (t_grafik >= grafik_start && t_grafik < grafik_end) {
-                    graphManager.updateGraphAnimation(t_grafik);
-                    animasi_grafik = true;  // Pastikan animasi tetap aktif
-                }
-                
-                // Kirim data controller (will be blocked automatically if paused by SerialHandler)
-                sendControllerData(actual_index);
-                
-                t_controller++;
-            } else {
-                currentState = SystemState::POST_REHAB_DELAY;
-                delayStartTime = currentTime;
+        if (rampUpIndex < gait_start) {
+            // Update grafik animasi untuk fase ramp-up
+            if (rampUpIndex >= grafik_start && rampUpIndex < grafik_end) {
+                graphManager.updateGraphAnimation(rampUpIndex);
+                animasi_grafik = true;
+                t_grafik = rampUpIndex;
             }
             
-            lastTraTime = currentTime;
+            // Kirim waypoint ramp-up dan tunggu ACK
+            sendControllerData(rampUpIndex);
+            waitingForWaypoint = true;
+            rampUpIndex++;
+            lastTraTime = std::chrono::steady_clock::now();
+        } else {
+            // Ramp-up selesai — beralih ke gait utama
+            rampUpPhase = false;
+            std::cout << "\n=== RAMP-UP SELESAI - MASUK GAIT UTAMA ==="  << std::endl;
         }
+        return;
     }
+    
+    // === FASE GAIT UTAMA ===
+    int jumlah_titik_gait = trajectoryManager.getGaitPointCount();
+    if (t_controller < jumlah_titik_gait) {
+        int actual_index = trajectoryManager.getGaitStartIndex() + t_controller;
+        
+        // Sinkronkan t_grafik
+        t_grafik = actual_index;
+        
+        // Update grafik animasi
+        if (t_grafik >= grafik_start && t_grafik < grafik_end) {
+            graphManager.updateGraphAnimation(t_grafik);
+            animasi_grafik = true;
+        }
+        
+        // Kirim waypoint dan tunggu ACK sebelum advance
+        sendControllerData(actual_index);
+        waitingForWaypoint = true;
+        t_controller++;
+        lastTraTime = std::chrono::steady_clock::now();
+    } else {
+        // Semua titik gait sudah dikirim → masuk delay sebelum cycle berikutnya
+        currentState = SystemState::POST_REHAB_DELAY;
+        delayStartTime = std::chrono::steady_clock::now();
+    }
+}
+
+void ControlHandler::notifyWaypointReached() {
+    waitingForWaypoint = false;
 }
 
 void ControlHandler::sendControllerData(int t) {

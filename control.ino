@@ -1016,7 +1016,13 @@ void loop() {
 
             if (waypointReachedAt > 0
                 && (now - waypointReachedAt) >= WAYPOINT_SETTLE_MS) {
-                Serial.println(F("WAYPOINT_REACHED"));
+                // Bedakan pesan forward vs retreat agar tidak ada false trigger
+                // di mini PC akibat pesan WAYPOINT_REACHED lama yang numpuk di buffer
+                if (operatingMode == 2) {
+                    Serial.println(F("WAYPOINT_REACHED_R"));   // Retreat: robot sudah di posisi home
+                } else {
+                    Serial.println(F("WAYPOINT_REACHED"));     // Forward: titik trajektori tercapai
+                }
                 waypointAckSent = true;
             }
         }
