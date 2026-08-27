@@ -371,7 +371,7 @@ void ControlHandler::processAutoRehab(SystemState& currentState, int& t_controll
     // === ACK-BASED + TIMEOUT FALLBACK ===
     // Tunggu WAYPOINT_REACHED dari Arduino.
     // Jika dalam WAYPOINT_ACK_TIMEOUT_MS tidak ada ACK, paksa lanjut ke titik berikutnya.
-    static const int WAYPOINT_ACK_TIMEOUT_MS = 3000;  // 3 detik timeout
+    static const int WAYPOINT_ACK_TIMEOUT_MS = 1500;  // 3 detik timeout
     
     if (waitingForWaypoint) {
         auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
