@@ -246,7 +246,10 @@ long lastSerialRxTime   = 0;   // Watchdog: last time any serial byte was receiv
 //  Leonardo USB CDC: Serial == false saat host disconnect
 //  Jika tidak ada data masuk > SERIAL_TIMEOUT_MS → emergency stop
 // ============================================================
-const long SERIAL_TIMEOUT_MS = 3000;   // 3 detik tanpa data = host mati
+const long SERIAL_TIMEOUT_MS = 10000;  // 10 detik tanpa data = host mati
+                                        // Dinaikkan dari 3s karena ACK-based system:
+                                        // motor bisa butuh > 3s untuk reach waypoint
+                                        // USB disconnect detection (Serial==false) tetap jadi safety utama
 bool hostWasConnected = false;          // Track state untuk edge detection
 
 // ============================================================
