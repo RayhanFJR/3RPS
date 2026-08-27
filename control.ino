@@ -218,6 +218,15 @@ long lastCTCCalcTime    = 0;
 long lastPDCalcTime     = 0;
 long lastAdmittanceTime = 0;
 long lastTelemTime      = 0;
+long lastSerialRxTime   = 0;   // Watchdog: last time any serial byte was received
+
+// ============================================================
+//  WATCHDOG — Host Disconnect Detection
+//  Leonardo USB CDC: Serial == false saat host disconnect
+//  Jika tidak ada data masuk > SERIAL_TIMEOUT_MS → emergency stop
+// ============================================================
+const long SERIAL_TIMEOUT_MS = 3000;   // 3 detik tanpa data = host mati
+bool hostWasConnected = false;          // Track state untuk edge detection
 
 // ============================================================
 //  MODE HELPERS
@@ -704,9 +713,39 @@ void loop() {
     long now = millis();
 
     // ----------------------------------------------------------
+    //  HOST DISCONNECT DETECTION (Leonardo USB CDC)
+    //  Serial == false  →  USB host (mini PC) sudah disconnect
+    // ----------------------------------------------------------
+    if (!Serial) {
+        // USB host terputus: stop semua motor langsung
+        if (hostWasConnected) {
+            stopAllMotors();
+            operatingMode  = 0;
+            manualCommand  = 0;
+            hostWasConnected = false;
+        }
+        return;   // Tunggu sampai host connect kembali
+    }
+    hostWasConnected = true;
+
+    // ----------------------------------------------------------
+    //  WATCHDOG — Timeout jika host tiba-tiba tidak kirim data
+    //  (fallback kalau USB tidak terdeteksi disconnect)
+    // ----------------------------------------------------------
+    if (lastSerialRxTime > 0 &&
+        (now - lastSerialRxTime) > SERIAL_TIMEOUT_MS &&
+        (operatingMode != 0 || manualCommand != 0)) {
+        stopAllMotors();
+        operatingMode = 0;
+        manualCommand = 0;
+        lastSerialRxTime = now;   // Reset agar tidak trigger berulang
+    }
+
+    // ----------------------------------------------------------
     //  SERIAL COMMAND PARSING
     // ----------------------------------------------------------
     if (Serial.available() > 0) {
+        lastSerialRxTime = now;   // Update watchdog setiap ada data masuk
         while (Serial.available() > 0) {
             char c = Serial.read();
             receivedData += c;
