@@ -106,25 +106,24 @@ SystemState handlePostRehabDelay(std::chrono::steady_clock::time_point& delaySta
             return SystemState::AUTO_REHAB;
         } 
         else {
-            // Semua cycle selesai — aktifkan retreat penuh ke titik awal gait
+            // All cycles completed — go to zero (retreat) before IDLE
             std::cout << "\n=== SEMUA CYCLE SELESAI ===" << std::endl;
             std::cout << "Total cycle completed: " << current_cycle << std::endl;
-            std::cout << "Memulai retreat otomatis ke posisi awal..." << std::endl;
-
+            std::cout << "Kembali ke posisi home (go to zero)..." << std::endl;
+            
             animasi_grafik = false;
-
+            
             modbus_mapping_t* mb_mapping = modbus.getMapping();
             if (mb_mapping != nullptr) {
                 mb_mapping->tab_registers[ModbusAddr::COMMAND_REG] = 0;
                 mb_mapping->tab_registers[ModbusAddr::START] = 0;
             }
-
+            
+            // Trigger go-to-zero retreat; akan auto ke IDLE setelah WAYPOINT_REACHED
             control.startAutoReturnToZero(t_controller);
-            lastTraTime = std::chrono::steady_clock::now();
-
+            
             return SystemState::AUTO_RETREAT;
         }
     }
     return SystemState::POST_REHAB_DELAY;
 }
-

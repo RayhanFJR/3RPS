@@ -137,15 +137,20 @@ int ControlHandler::clampRetreatIndex(int controllerSteps) const {
     return actualIndex;
 }
 
-void ControlHandler::startAutoReturnToZero(int controllerSteps) {
+void ControlHandler::startAutoReturnToZero(int /*controllerSteps*/) {
     if (retreatActive) return;
     
-    int retreatStartIndex = clampRetreatIndex(controllerSteps);
-    startRetreatSequence(retreatStartIndex);
-    autoReturnToIdle = true;
+    // Go-to-zero: kirim satu command R ke posisi home (0,0,0)
+    // Arduino CTC yang bawa semua motor ke 0 langsung
+    retreatActive     = true;
+    autoReturnToIdle  = true;
+    lastForwardIndex  = 0;   // tidak dipakai, tapi tetap di-set
     
-    std::cout << "\n=== MENGEMBALIKAN POSISI KE TITIK AWAL ===" << std::endl;
-    std::cout << "Mulai mundur dari index: " << retreatStartIndex << std::endl;
+    serialHandler.resetPauseState();
+    serialHandler.sendCommand("R0,0,0,0,0,0,0,0,0");
+    
+    std::cout << "\n=== GO TO ZERO (AUTO RETURN) ===" << std::endl;
+    std::cout << "Semua motor bergerak ke posisi home (0,0,0)..." << std::endl;
 }
 
 void ControlHandler::completeAutoReturnToIdle() {
@@ -221,15 +226,41 @@ void ControlHandler::processArduinoFeedback(std::string& arduinoFeedbackState,
     // === CRITICAL: Check for pause/resume signals FIRST ===
     serialHandler.processIncomingData(resultString);
     
-    // === Deteksi retreat eksplisit dari Arduino (bukan YANK_PAUSE) ===
+    // === WAYPOINT_REACHED saat AUTO_RETREAT → retreat selesai ===
+    if (resultString.find("WAYPOINT_REACHED") != std::string::npos &&
+        currentState == SystemState::AUTO_RETREAT) {
+        serialHandler.sendCommand("RETREAT_COMPLETE");
+        serialHandler.sendCommand("0");
+        retreatActive = false;
+        std::cout << "\n=== HOME POSITION REACHED - RETREAT COMPLETE ===" << std::endl;
+    }
+
+    // === Deteksi retreat dari Arduino (YANK_PAUSE atau eksplisit RETREAT) ===
+    bool retreatTriggered = false;
+
+    if (resultString.find("YANK_PAUSE") != std::string::npos &&
+        currentState == SystemState::AUTO_REHAB) {
+        std::cout << "\n!!! YANK SPIKE — TRIGGERING GO-TO-ZERO RETREAT !!!" << std::endl;
+        retreatTriggered = true;
+    }
+
     if (resultString.find("RETREAT") != std::string::npos &&
         resultString.find("ACK_RETREAT") == std::string::npos &&
         resultString.find("YANK_PAUSE") == std::string::npos &&
         currentState == SystemState::AUTO_REHAB) {
         std::cout << "\n!!! RETREAT COMMAND RECEIVED !!!" << std::endl;
-        int retreatStartIndex = clampRetreatIndex(t_controller);
-        startRetreatSequence(retreatStartIndex);
+        retreatTriggered = true;
+    }
+
+    if (retreatTriggered) {
+        // Go-to-zero: kirim langsung ke posisi 0,0,0
+        retreatActive    = true;
+        autoReturnToIdle = false;   // Safety retreat — tunggu RESET dari HMI
+        lastForwardIndex = t_controller;
+        serialHandler.resetPauseState();
+        serialHandler.sendCommand("R0,0,0,0,0,0,0,0,0");
         currentState = SystemState::AUTO_RETREAT;
+        std::cout << "Semua motor bergerak ke posisi home (0,0,0)..." << std::endl;
     }
     
     if (resultString.find("paused") != std::string::npos) {
@@ -269,40 +300,25 @@ void ControlHandler::processArduinoFeedback(std::string& arduinoFeedbackState,
     }
 }
 
-void ControlHandler::startRetreatSequence(int currentIndex) {
-    retreatActive = true;
-    retreatIndex = currentIndex - 1;
-    lastForwardIndex = currentIndex;
-    retreatTargetIndex = trajectoryManager.getGaitStartIndex();
+void ControlHandler::startRetreatSequence(int /*currentIndex*/) {
+    retreatActive    = true;
+    autoReturnToIdle = false;
 
-    // Reset admittance pause — retreat harus jalan sampai titik awal gait
+    // Reset admittance pause — robot harus bisa mundur bebas dari gaya eksternal
     serialHandler.resetPauseState();
 
-    std::cout << "\n=== RETREAT SEQUENCE STARTED ===" << std::endl;
-    std::cout << "From index: " << retreatIndex
-              << " → target: " << retreatTargetIndex << std::endl;
+    // Go-to-zero: satu command langsung ke posisi home (0,0,0)
+    // Arduino CTC loop yang bawa semua motor ke 0
+    serialHandler.sendCommand("R0,0,0,0,0,0,0,0,0");
+
+    std::cout << "\n=== GO TO ZERO RETREAT ===" << std::endl;
+    std::cout << "Semua motor menuju posisi home (0,0,0)..." << std::endl;
 }
 
-void ControlHandler::processRetreatSequence(std::chrono::steady_clock::time_point& lastTraTime) {
-    auto currentTime = std::chrono::steady_clock::now();
-
-    if (retreatIndex >= retreatTargetIndex) {
-        bool isFirstRetreatData = (retreatIndex == lastForwardIndex - 1);
-        bool shouldSend = isFirstRetreatData ||
-                         ((currentTime - lastTraTime) >= std::chrono::milliseconds(JEDA_KONTROLER_MS));
-
-        if (shouldSend) {
-            sendRetreatData(retreatIndex);
-            retreatIndex--;
-            lastTraTime = currentTime;
-        }
-    } else {
-        serialHandler.sendCommand("RETREAT_COMPLETE");
-        retreatActive = false;
-        std::cout << "\n=== RETREAT SEQUENCE COMPLETED ===" << std::endl;
-        std::cout << "Robot kembali ke titik awal gait (index "
-                  << retreatTargetIndex << ")" << std::endl;
-    }
+void ControlHandler::processRetreatSequence(std::chrono::steady_clock::time_point& /*lastTraTime*/) {
+    // Go-to-zero mode: Arduino sudah diberi target R0,0,0,0,0,0,0,0,0 saat retreat dimulai
+    // Tidak perlu polling — tunggu WAYPOINT_REACHED dari Arduino
+    // (ditangani di processArduinoFeedback)
 }
 
 void ControlHandler::processAutoRehab(SystemState& currentState, int& t_controller, int& t_grafik,
