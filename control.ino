@@ -104,7 +104,12 @@ int   yankDebounceCount = 0;   // Counter debounce yank
 //  Mini PC baru boleh kirim waypoint berikutnya
 // ============================================================
 const float WAYPOINT_TOL       = 3.0;   // mm — error dianggap "sampai"
-const long  WAYPOINT_SETTLE_MS = 300;   // ms — harus di dalam toleransi sebelum ACK
+const long  WAYPOINT_SETTLE_MS = 50;    // ms — dikurangi dari 300ms agar kecepatan tidak turun
+                                        // (trajectory didesain cadence 100ms, 50ms settle = aman)
+
+// Anti-deadzone: motor tidak bisa start dari PWM sangat kecil karena static friction
+const int   MIN_MOTOR_PWM  = 30;        // PWM minimum agar motor bisa mulai bergerak
+const float ERR_DEADBAND   = 0.4;       // mm — error di bawah ini diabaikan (tidak perlu dikejar)
 
 bool  waypointActive    = false;   // Sedang tracking waypoint
 bool  waypointAckSent   = false;   // Sudah kirim WAYPOINT_REACHED?
@@ -622,20 +627,27 @@ void calculatePD() {
 }
 
 void applyMotorControl() {
-    // Motor 1
-    if      (ErrPos1 > 0) { analogWrite(RPWM1, abs(controlValue1)); analogWrite(LPWM1, 0); }
-    else if (ErrPos1 < 0) { analogWrite(RPWM1, 0); analogWrite(LPWM1, abs(controlValue1)); }
-    else                  { analogWrite(RPWM1, 0); analogWrite(LPWM1, 0); }
+    // Helper lambda: clip PWM ke minimum jika ada error signifikan
+    // Ini mencegah motor tidak bergerak saat PD output < static friction threshold
+    auto applyPWM = [](float errPos, float ctrlVal, int rpwm, int lpwm) {
+        if (errPos > ERR_DEADBAND) {
+            int pwm = max((int)abs(ctrlVal), MIN_MOTOR_PWM);  // Boost ke min jika terlalu kecil
+            analogWrite(rpwm, pwm);
+            analogWrite(lpwm, 0);
+        } else if (errPos < -ERR_DEADBAND) {
+            int pwm = max((int)abs(ctrlVal), MIN_MOTOR_PWM);
+            analogWrite(rpwm, 0);
+            analogWrite(lpwm, pwm);
+        } else {
+            // Error dalam deadband — motor tidak perlu koreksi
+            analogWrite(rpwm, 0);
+            analogWrite(lpwm, 0);
+        }
+    };
 
-    // Motor 2
-    if      (ErrPos2 > 0) { analogWrite(RPWM2, abs(controlValue2)); analogWrite(LPWM2, 0); }
-    else if (ErrPos2 < 0) { analogWrite(RPWM2, 0); analogWrite(LPWM2, abs(controlValue2)); }
-    else                  { analogWrite(RPWM2, 0); analogWrite(LPWM2, 0); }
-
-    // Motor 3
-    if      (ErrPos3 > 0) { analogWrite(RPWM3, abs(controlValue3)); analogWrite(LPWM3, 0); }
-    else if (ErrPos3 < 0) { analogWrite(RPWM3, 0); analogWrite(LPWM3, abs(controlValue3)); }
-    else                  { analogWrite(RPWM3, 0); analogWrite(LPWM3, 0); }
+    applyPWM(ErrPos1, controlValue1, RPWM1, LPWM1);
+    applyPWM(ErrPos2, controlValue2, RPWM2, LPWM2);
+    applyPWM(ErrPos3, controlValue3, RPWM3, LPWM3);
 }
 
 void sendTelemetry() {

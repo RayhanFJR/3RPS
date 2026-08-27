@@ -253,10 +253,10 @@ void ControlHandler::processArduinoFeedback(std::string& arduinoFeedbackState,
     // === CRITICAL: Check for pause/resume signals FIRST ===
     serialHandler.processIncomingData(resultString);
     
-    // === WAYPOINT_REACHED_R saat AUTO_RETREAT → retreat selesai ===
-    // Pakai pesan khusus _R agar tidak tertukar dengan WAYPOINT_REACHED
-    // dari forward trajectory yang mungkin masih numpuk di serial buffer
-    if (resultString.find("WAYPOINT_REACHED_R") != std::string::npos &&
+    // === WAYPOINT_REACHED saat AUTO_RETREAT → retreat selesai ===
+    // Arduino sekarang kirim WAYPOINT_REACHED untuk semua kasus (forward & retreat)
+    // Bedakan via currentState: AUTO_RETREAT = retreat done, AUTO_REHAB = advance trajectory
+    if (resultString.find("WAYPOINT_REACHED") != std::string::npos &&
         currentState == SystemState::AUTO_RETREAT) {
         serialHandler.sendCommand("RETREAT_COMPLETE");
         serialHandler.sendCommand("0");
@@ -267,8 +267,7 @@ void ControlHandler::processArduinoFeedback(std::string& arduinoFeedbackState,
     // === WAYPOINT_REACHED saat AUTO_REHAB → kirim titik trajektori berikutnya ===
     // ACK-based: Arduino konfirmasi motor sudah sampai sebelum mini PC kirim titik berikutnya
     if (resultString.find("WAYPOINT_REACHED") != std::string::npos &&
-        resultString.find("WAYPOINT_REACHED_R") == std::string::npos &&
-        (currentState == SystemState::AUTO_REHAB)) {
+        currentState == SystemState::AUTO_REHAB) {
         notifyWaypointReached();
         std::cout << "[ACK] WAYPOINT_REACHED - kirim titik berikutnya" << std::endl;
     }
