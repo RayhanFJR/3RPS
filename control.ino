@@ -403,7 +403,7 @@ void parseTrajectoryCommand(String data, bool isRetreat) {
         data    = data.substring(comma + 1);
     }
 
-    if (trajectoryPaused) return;   // Ignore new commands while paused
+    if (trajectoryPaused && !isRetreat) return;   // Hanya block S (forward), retreat HARUS lolos
 
     refPos1 = vals[0]; refPos2 = vals[1]; refPos3 = vals[2];
     refVelo1 = vals[3]; refVelo2 = vals[4]; refVelo3 = vals[5];
@@ -826,8 +826,10 @@ void loop() {
                     }
                 }
                 else if (receivedData.startsWith("R") && receivedData.indexOf(',') > 0) {
-                    operatingMode    = 2;
-                    manipulatorState = 0;
+                    operatingMode     = 2;
+                    manipulatorState  = 0;
+                    trajectoryPaused  = false;  // Force clear admittance pause — retreat harus jalan
+                    yankPauseUntil    = 0;      // Force clear yank pause
                     parseTrajectoryCommand(receivedData, true);
                     // DEBUG: cetak refPos1/2/3 hasil parsing retreat command
                     // Untuk retreat ke home (0,0,0) harusnya tampil ref=(0.0,0.0,0.0)
