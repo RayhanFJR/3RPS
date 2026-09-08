@@ -13,6 +13,7 @@ ControlHandler::ControlHandler(ModbusHandler& modbus, SerialHandler& serial,
       target_cycle(1), current_cycle(0),
       retreatIndex(0), retreatTargetIndex(0), retreatActive(false), lastForwardIndex(0),
       autoReturnToIdle(false),
+      retreatStartTime(std::chrono::steady_clock::now()),
       rampUpPhase(false), rampUpIndex(0) {
     initLogger();
 }
@@ -170,7 +171,8 @@ void ControlHandler::startAutoReturnToZero(int /*controllerSteps*/) {
     // Arduino CTC yang bawa semua motor ke 0 langsung
     retreatActive     = true;
     autoReturnToIdle  = true;
-    lastForwardIndex  = 0;   // tidak dipakai, tapi tetap di-set
+    lastForwardIndex  = 0;
+    retreatStartTime  = std::chrono::steady_clock::now();  // Mulai timer min-delay
     
     serialHandler.resetPauseState();
     serialHandler.sendCommand("R0,0,0,0,0,0,0,0,0");
@@ -252,30 +254,9 @@ void ControlHandler::processArduinoFeedback(std::string& arduinoFeedbackState,
     // === CRITICAL: Check for pause/resume signals FIRST ===
     serialHandler.processIncomingData(resultString);
     
-    // === Deteksi retreat selesai dari posisi aktual (telemetri p1/p2/p3) ===
-    // WAYPOINT_REACHED tidak lagi dikirim Arduino → gunakan posisi dari telemetri.
-    // Retreat dianggap selesai jika semua motor sudah dalam RETREAT_TOL dari posisi home (0).
-    if (currentState == SystemState::AUTO_RETREAT && retreatActive) {
-        float p1 = serialHandler.parseValue(resultString, "p1:");
-        float p2 = serialHandler.parseValue(resultString, "p2:");
-        float p3 = serialHandler.parseValue(resultString, "p3:");
-
-        const float RETREAT_TOL = 2.0f;   // mm — dianggap sudah di posisi home
-        if (p1 != -1.0f && p2 != -1.0f && p3 != -1.0f) {
-            if (std::abs(p1) < RETREAT_TOL &&
-                std::abs(p2) < RETREAT_TOL &&
-                std::abs(p3) < RETREAT_TOL) {
-                serialHandler.sendCommand("RETREAT_COMPLETE");
-                serialHandler.sendCommand("0");
-                retreatActive = false;
-                std::cout << "\n=== HOME POSITION REACHED - RETREAT COMPLETE ===" << std::endl;
-                std::cout << "Posisi akhir: p1=" << p1 << " p2=" << p2
-                          << " p3=" << p3 << " mm" << std::endl;
-            }
-        }
-    }
-
     // === Deteksi retreat dari Arduino (YANK_PAUSE atau eksplisit RETREAT) ===
+    // HARUS dicek SEBELUM position check agar tidak salah langsung complete
+    // saat posisi kebetulan dekat 0 di awal rehab bersamaan dengan YANK event.
     bool retreatTriggered = false;
 
     if (resultString.find("YANK_PAUSE") != std::string::npos &&
@@ -293,14 +274,46 @@ void ControlHandler::processArduinoFeedback(std::string& arduinoFeedbackState,
     }
 
     if (retreatTriggered) {
-        // Go-to-zero: kirim langsung ke posisi 0,0,0
         retreatActive    = true;
-        autoReturnToIdle = false;   // Safety retreat — tunggu RESET dari HMI
+        autoReturnToIdle = false;
         lastForwardIndex = t_controller;
+        retreatStartTime = std::chrono::steady_clock::now();  // Catat waktu retreat mulai
         serialHandler.resetPauseState();
         serialHandler.sendCommand("R0,0,0,0,0,0,0,0,0");
         currentState = SystemState::AUTO_RETREAT;
         std::cout << "Semua motor bergerak ke posisi home (0,0,0)..." << std::endl;
+        return;  // Skip position check di iterasi ini — retreat baru saja dimulai
+    }
+
+    // === Deteksi retreat selesai dari posisi aktual (telemetri p1/p2/p3) ===
+    // WAYPOINT_REACHED tidak lagi dikirim Arduino → gunakan posisi dari telemetri.
+    // Guard: tunggu minimal RETREAT_MIN_MS sebelum mulai cek posisi,
+    // agar motor sempat bergerak dari posisi awal menuju home.
+    if (currentState == SystemState::AUTO_RETREAT && retreatActive) {
+        auto retreatElapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - retreatStartTime).count();
+
+        const int RETREAT_MIN_MS  = 1000;  // ms minimum sebelum cek posisi
+        const float RETREAT_TOL   = 2.0f;  // mm — dianggap sudah di posisi home
+
+        if (retreatElapsed >= RETREAT_MIN_MS) {
+            float p1 = serialHandler.parseValue(resultString, "p1:");
+            float p2 = serialHandler.parseValue(resultString, "p2:");
+            float p3 = serialHandler.parseValue(resultString, "p3:");
+
+            if (p1 != -1.0f && p2 != -1.0f && p3 != -1.0f) {
+                if (std::abs(p1) < RETREAT_TOL &&
+                    std::abs(p2) < RETREAT_TOL &&
+                    std::abs(p3) < RETREAT_TOL) {
+                    serialHandler.sendCommand("RETREAT_COMPLETE");
+                    serialHandler.sendCommand("0");
+                    retreatActive = false;
+                    std::cout << "\n=== HOME POSITION REACHED - RETREAT COMPLETE ===" << std::endl;
+                    std::cout << "Posisi akhir: p1=" << p1 << " p2=" << p2
+                              << " p3=" << p3 << " mm" << std::endl;
+                }
+            }
+        }
     }
     
     if (resultString.find("paused") != std::string::npos) {
