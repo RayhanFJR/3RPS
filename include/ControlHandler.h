@@ -80,8 +80,9 @@ private:
     bool retreatActive;
     int lastForwardIndex;
     bool autoReturnToIdle;
-    std::chrono::steady_clock::time_point retreatStartTime;  // Waktu retreat mulai (untuk min-delay cek posisi)
-    int retreatHomeCount;  // Counter berapa kali berturut-turut posisi < RETREAT_TOL
+    std::chrono::steady_clock::time_point retreatStartTime;
+    int   retreatStallCount;   // Paket berturut-turut di mana posisi tidak berubah
+    float stallP1, stallP2, stallP3;  // Posisi saat stall check terakhir
     
     // Ramp-up phase (traversal index 1 → gaitStart sebelum gait utama)
     bool rampUpPhase;           // true = sedang dalam fase ramp-up

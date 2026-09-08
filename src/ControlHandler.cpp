@@ -13,7 +13,8 @@ ControlHandler::ControlHandler(ModbusHandler& modbus, SerialHandler& serial,
       target_cycle(1), current_cycle(0),
       retreatIndex(0), retreatTargetIndex(0), retreatActive(false), lastForwardIndex(0),
       autoReturnToIdle(false),
-      retreatStartTime(std::chrono::steady_clock::now()), retreatHomeCount(0),
+      retreatStartTime(std::chrono::steady_clock::now()),
+      retreatStallCount(0), stallP1(0.0f), stallP2(0.0f), stallP3(0.0f),
       rampUpPhase(false), rampUpIndex(0) {
     initLogger();
 }
@@ -172,7 +173,11 @@ void ControlHandler::startAutoReturnToZero(int /*controllerSteps*/) {
     retreatActive     = true;
     autoReturnToIdle  = true;
     lastForwardIndex  = 0;
-    retreatStartTime  = std::chrono::steady_clock::now();  // Mulai timer min-delay
+    retreatStartTime  = std::chrono::steady_clock::now();
+    retreatStallCount = 0;
+    stallP1 = serialHandler.getLastPos1();
+    stallP2 = serialHandler.getLastPos2();
+    stallP3 = serialHandler.getLastPos3();
     
     serialHandler.resetPauseState();
     serialHandler.sendCommand("R0,0,0,0,0,0,0,0,0");
@@ -274,11 +279,14 @@ void ControlHandler::processArduinoFeedback(std::string& arduinoFeedbackState,
     }
 
     if (retreatTriggered) {
-        retreatActive    = true;
-        autoReturnToIdle = false;
-        lastForwardIndex = t_controller;
-        retreatStartTime = std::chrono::steady_clock::now();
-        retreatHomeCount = 0;  // Reset counter setiap kali retreat baru dimulai
+        retreatActive     = true;
+        autoReturnToIdle  = false;
+        lastForwardIndex  = t_controller;
+        retreatStartTime  = std::chrono::steady_clock::now();
+        retreatStallCount = 0;
+        stallP1 = serialHandler.getLastPos1();
+        stallP2 = serialHandler.getLastPos2();
+        stallP3 = serialHandler.getLastPos3();
         serialHandler.resetPauseState();
         serialHandler.sendCommand("R0,0,0,0,0,0,0,0,0");
         currentState = SystemState::AUTO_RETREAT;
@@ -286,45 +294,47 @@ void ControlHandler::processArduinoFeedback(std::string& arduinoFeedbackState,
         return;
     }
 
-    // === Deteksi retreat selesai dari posisi aktual (telemetri p1/p2/p3) ===
-    // Guard 1: tunggu minimal RETREAT_MIN_MS agar motor sempat bergerak
-    // Guard 2: butuh RETREAT_HOME_COUNT paket berturut-turut < RETREAT_TOL
-    //          agar tidak false-trigger saat posisi kebetulan melewati 0
+    // === Stall Detection: posisi tidak berubah selama STALL_PACKETS berturut-turut ===
+    // Lebih reliable dari position < TOL karena tidak butuh encoder kalibrasi ke 0.
+    // Saat robot mentok ke batas fisik, motor stall, posisi berhenti berubah.
+    // Membaca dari serialHandler.getLastPos() yang di-parse dari complete telemetry line
+    // (bukan raw chunk) — aman dari noise ep1/rp1 substring.
     if (currentState == SystemState::AUTO_RETREAT && retreatActive) {
-        float p1 = serialHandler.parseValue(resultString, "p1:");
-        float p2 = serialHandler.parseValue(resultString, "p2:");
-        float p3 = serialHandler.parseValue(resultString, "p3:");
-
         auto retreatElapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now() - retreatStartTime).count();
 
-        const long  RETREAT_MIN_MS     = 3000;  // ms minimum sebelum mulai cek
-        const float RETREAT_TOL        = 0.5f;  // mm — lebih ketat dari sebelumnya
-        const int   RETREAT_HOME_COUNT = 3;     // paket berturut-turut harus < TOL
+        const long  RETREAT_MIN_MS  = 2000; // ms minimum sebelum mulai cek (beri waktu bergerak)
+        const float STALL_DELTA_TOL = 0.5f; // mm total delta per siklus dianggap "diam"
+        const int   STALL_PACKETS   = 15;   // 15 paket x 100ms = 1.5 detik diam = selesai
 
-        // Debug: tampilkan status setiap ada data posisi masuk
-        if (p1 != -1.0f) {
-            std::cout << "[RETREAT-DBG] elapsed=" << retreatElapsed
-                      << "ms | p1=" << p1 << " p2=" << p2 << " p3=" << p3
-                      << " | homeCount=" << retreatHomeCount
-                      << "/" << RETREAT_HOME_COUNT << std::endl;
-        }
+        float p1 = serialHandler.getLastPos1();
+        float p2 = serialHandler.getLastPos2();
+        float p3 = serialHandler.getLastPos3();
 
-        if (retreatElapsed >= RETREAT_MIN_MS && p1 != -1.0f && p2 != -1.0f && p3 != -1.0f) {
-            if (std::abs(p1) < RETREAT_TOL &&
-                std::abs(p2) < RETREAT_TOL &&
-                std::abs(p3) < RETREAT_TOL) {
-                retreatHomeCount++;
+        if (retreatElapsed >= RETREAT_MIN_MS && p1 != -1.0f) {
+            float delta = std::abs(p1 - stallP1)
+                        + std::abs(p2 - stallP2)
+                        + std::abs(p3 - stallP3);
+
+            if (delta < STALL_DELTA_TOL) {
+                retreatStallCount++;
             } else {
-                retreatHomeCount = 0;  // Reset jika posisi naik lagi
+                retreatStallCount = 0;
+                stallP1 = p1; stallP2 = p2; stallP3 = p3;  // Update referensi
             }
 
-            if (retreatHomeCount >= RETREAT_HOME_COUNT) {
+            std::cout << "[STALL-DBG] elapsed=" << retreatElapsed
+                      << "ms | p=(" << p1 << "," << p2 << "," << p3 << ")"
+                      << " delta=" << delta
+                      << " stall=" << retreatStallCount << "/" << STALL_PACKETS
+                      << std::endl;
+
+            if (retreatStallCount >= STALL_PACKETS) {
                 serialHandler.sendCommand("RETREAT_COMPLETE");
                 serialHandler.sendCommand("0");
-                retreatActive    = false;
-                retreatHomeCount = 0;
-                std::cout << "\n=== HOME POSITION REACHED - RETREAT COMPLETE ===" << std::endl;
+                retreatActive     = false;
+                retreatStallCount = 0;
+                std::cout << "\n=== ROBOT STALLED AT HOME — RETREAT COMPLETE ==="  << std::endl;
                 std::cout << "Posisi akhir: p1=" << p1 << " p2=" << p2
                           << " p3=" << p3 << " mm" << std::endl;
             }

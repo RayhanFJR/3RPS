@@ -14,6 +14,12 @@ private:
     bool trajectoryPaused;
     std::string lineBuffer;
 
+    // Posisi aktual terbaru dari complete telemetry line (s:... format)
+    // Lebih reliable dari parseValue(rawChunk) karena tidak kena noise ep1/rp1 substring
+    float lastActPos1;
+    float lastActPos2;
+    float lastActPos3;
+
     void processLine(const std::string& line);
     void printTelemetryToConsole(const std::string& line);
     void printEventLine(const std::string& line);
@@ -33,6 +39,11 @@ public:
     void processArduinoFeedback(const std::string& data);
     bool isTrajectoryPaused() const { return trajectoryPaused; }
     void resetPauseState() { trajectoryPaused = false; }
+
+    // Getter posisi aktual terbaru (dari complete telemetry line)
+    float getLastPos1() const { return lastActPos1; }
+    float getLastPos2() const { return lastActPos2; }
+    float getLastPos3() const { return lastActPos3; }
 };
 
 #endif // SERIALHANDLER_H

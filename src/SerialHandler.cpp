@@ -7,7 +7,8 @@
 #include <array>
 
 SerialHandler::SerialHandler(io_context& io) 
-    : serial(io), io(io), isOpen(false), trajectoryPaused(false) {
+    : serial(io), io(io), isOpen(false), trajectoryPaused(false),
+      lastActPos1(-1.0f), lastActPos2(-1.0f), lastActPos3(-1.0f) {
 }
 
 SerialHandler::~SerialHandler() {
@@ -114,6 +115,17 @@ void SerialHandler::processIncomingData(const std::string& chunk) {
 
 void SerialHandler::processLine(const std::string& line) {
     processArduinoFeedback(line);
+
+    // Jika ini telemetri (prefix s:), ekstrak posisi aktual untuk stall detection
+    // Ini parsing dari complete line — lebih reliable dari raw chunk (tidak kena noise ep1/rp1)
+    if (line.compare(0, 2, "s:") == 0) {
+        float p1 = parseValue(line, ",p1:");
+        float p2 = parseValue(line, ",p2:");
+        float p3 = parseValue(line, ",p3:");
+        if (p1 != -1.0f) lastActPos1 = p1;
+        if (p2 != -1.0f) lastActPos2 = p2;
+        if (p3 != -1.0f) lastActPos3 = p3;
+    }
 
     if (ENABLE_TELEMETRY_CONSOLE && line.compare(0, 2, "s:") == 0) {
         printTelemetryToConsole(line);
