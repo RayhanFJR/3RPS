@@ -878,7 +878,6 @@ void loop() {
                 if (yankDebounceCount >= YANK_DEBOUNCE_REQ) {
                     yankPauseUntil    = now + YANK_PAUSE_MS;
                     yankDebounceCount = 0;
-                    waypointReachedAt = 0;   // Paksa settle ulang setelah pause
                     Serial.print(F("YANK_PAUSE yank="));
                     Serial.print(yank, 2);
                     Serial.println(F(" unit/s"));
