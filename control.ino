@@ -65,6 +65,26 @@ const int INTERVAL_TELEMETRY   = 100;   // Kirim data telemetri ke mini PC
 const bool ENABLE_LOCAL_PRINT  = false; // Debug lokal Arduino IDE (false = monitor via mini PC)
 
 // ============================================================
+//  DEBUG FLAG — COMMAND ECHO
+//  ENABLE_CMD_DEBUG = true  : setiap command yang diterima Arduino
+//  akan di-echo balik ke mini PC dengan prefix [CMD].
+//
+//  Berguna untuk diagnosa:
+//    - Verifikasi command S/R/X/E/0 benar-benar diterima Arduino
+//    - Cek refPos hasil parsing (FWD dan RETREAT)
+//    - Trace urutan command saat sesi rehab berjalan
+//
+//  Output di console mini PC:
+//    [CMD-ARDUINO] S12.5,8.3,...    ← raw command
+//    [CMD-ARDUINO] FWD ref=(12.5,8.3,9.1)  ← refPos setelah parse
+//    [CMD-ARDUINO] RETREAT ref=(0.0,0.0,0.0)
+//
+//  MATIKAN setelah selesai debug (set false) agar tidak
+//  menambah beban Serial dan mengacaukan log telemetri.
+// ============================================================
+const bool ENABLE_CMD_DEBUG    = true;  // [CMD] echo setiap command ke mini PC
+
+// ============================================================
 //  MOTOR & DRIVE PARAMETERS
 // ============================================================
 const float GR = 0.2786;   // Gear ratio
@@ -767,6 +787,18 @@ void loop() {
             if (c == '\n') {
                 receivedData.trim();
 
+                // ============================================================
+                //  DEBUG: Echo raw command yang diterima ke mini PC
+                //  Tujuan : konfirmasi Arduino benar-benar menerima command
+                //           yang dikirim mini PC (S, R, 0, X, E, dll.)
+                //  Format : [CMD] <isi_command_mentah>
+                //  Contoh : [CMD] S12.50,8.30,9.10,...
+                //  Guard  : ENABLE_CMD_DEBUG harus true
+                // ============================================================
+                if (ENABLE_CMD_DEBUG) {
+                    Serial.print(F("[CMD] ")); Serial.println(receivedData);
+                }
+
                 // --- Trajectory commands ---
                 if (receivedData.startsWith("S")) {
                     operatingMode           = 1;
@@ -774,11 +806,29 @@ void loop() {
                     retreatRequestSent      = false;
                     manipulatorState        = 0;
                     parseTrajectoryCommand(receivedData, false);
+                    // DEBUG: cetak refPos1/2/3 hasil parsing forward command
+                    // Berguna untuk verifikasi bahwa nilai yang di-parse
+                    // sesuai dengan yang dikirim mini PC (tidak corrupt/truncated)
+                    if (ENABLE_CMD_DEBUG) {
+                        Serial.print(F("[CMD] FWD ref=("));
+                        Serial.print(refPos1,1); Serial.print(F(","));
+                        Serial.print(refPos2,1); Serial.print(F(","));
+                        Serial.print(refPos3,1); Serial.println(F(")"));
+                    }
                 }
                 else if (receivedData.startsWith("R") && receivedData.indexOf(',') > 0) {
                     operatingMode    = 2;
                     manipulatorState = 0;
                     parseTrajectoryCommand(receivedData, true);
+                    // DEBUG: cetak refPos1/2/3 hasil parsing retreat command
+                    // Untuk retreat ke home (0,0,0) harusnya tampil ref=(0.0,0.0,0.0)
+                    // Jika bukan 0 berarti mini PC kirim retreat dengan target salah
+                    if (ENABLE_CMD_DEBUG) {
+                        Serial.print(F("[CMD] RETREAT ref=("));
+                        Serial.print(refPos1,1); Serial.print(F(","));
+                        Serial.print(refPos2,1); Serial.print(F(","));
+                        Serial.print(refPos3,1); Serial.println(F(")"));
+                    }
                 }
                 else if (receivedData == "RETREAT_COMPLETE") {
                     operatingMode           = 0;

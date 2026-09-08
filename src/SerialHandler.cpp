@@ -169,6 +169,22 @@ void SerialHandler::printEventLine(const std::string& line) {
     if (line == "READY") {
         std::cout << "[ARDUINO] Sistem siap (telemetri via mini PC)" << std::endl;
     }
+    else if (line.compare(0, 5, "[CMD]") == 0) {
+        // Debug output dari Arduino saat ENABLE_CMD_DEBUG = true di control.ino.
+        // Format diterima : "[CMD] <isi>"
+        // Format ditampilkan : "[CMD-ARDUINO] <isi>"
+        //
+        // Dua jenis output yang mungkin:
+        //   1. Raw command  : "[CMD] S12.5,8.3,..."  atau "[CMD] R0,0,0,..."
+        //   2. Parsed refPos: "[CMD] FWD ref=(x,y,z)" atau "[CMD] RETREAT ref=(x,y,z)"
+        //
+        // Gunakan ini untuk:
+        //   - Verifikasi timing pengiriman command dari mini PC
+        //   - Cek korupsi data serial (refPos harus match dengan yang dikirim)
+        //   - Trace retreat: "[CMD] RETREAT ref=(0.0,0.0,0.0)" harus muncul
+        //     tepat saat mini PC kirim perintah go-to-zero
+        std::cout << "[CMD-ARDUINO] " << line.substr(6) << std::endl;
+    }
     else if (line.find("YANK_PAUSE") != std::string::npos) {
         std::cout << "[SAFETY] " << line << std::endl;
     }
