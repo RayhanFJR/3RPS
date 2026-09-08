@@ -4,6 +4,7 @@
 #include <iostream>
 #include <sstream>
 #include <chrono>
+#include <cmath>
 
 ControlHandler::ControlHandler(ModbusHandler& modbus, SerialHandler& serial,
                                TrajectoryManager& trajectory, GraphManager& graph)
@@ -251,13 +252,27 @@ void ControlHandler::processArduinoFeedback(std::string& arduinoFeedbackState,
     // === CRITICAL: Check for pause/resume signals FIRST ===
     serialHandler.processIncomingData(resultString);
     
-    // === WAYPOINT_REACHED saat AUTO_RETREAT → retreat selesai ===
-    if (resultString.find("WAYPOINT_REACHED") != std::string::npos &&
-        currentState == SystemState::AUTO_RETREAT) {
-        serialHandler.sendCommand("RETREAT_COMPLETE");
-        serialHandler.sendCommand("0");
-        retreatActive = false;
-        std::cout << "\n=== HOME POSITION REACHED - RETREAT COMPLETE ===" << std::endl;
+    // === Deteksi retreat selesai dari posisi aktual (telemetri p1/p2/p3) ===
+    // WAYPOINT_REACHED tidak lagi dikirim Arduino → gunakan posisi dari telemetri.
+    // Retreat dianggap selesai jika semua motor sudah dalam RETREAT_TOL dari posisi home (0).
+    if (currentState == SystemState::AUTO_RETREAT && retreatActive) {
+        float p1 = serialHandler.parseValue(resultString, "p1:");
+        float p2 = serialHandler.parseValue(resultString, "p2:");
+        float p3 = serialHandler.parseValue(resultString, "p3:");
+
+        const float RETREAT_TOL = 2.0f;   // mm — dianggap sudah di posisi home
+        if (p1 != -1.0f && p2 != -1.0f && p3 != -1.0f) {
+            if (std::abs(p1) < RETREAT_TOL &&
+                std::abs(p2) < RETREAT_TOL &&
+                std::abs(p3) < RETREAT_TOL) {
+                serialHandler.sendCommand("RETREAT_COMPLETE");
+                serialHandler.sendCommand("0");
+                retreatActive = false;
+                std::cout << "\n=== HOME POSITION REACHED - RETREAT COMPLETE ===" << std::endl;
+                std::cout << "Posisi akhir: p1=" << p1 << " p2=" << p2
+                          << " p3=" << p3 << " mm" << std::endl;
+            }
+        }
     }
 
     // === Deteksi retreat dari Arduino (YANK_PAUSE atau eksplisit RETREAT) ===
