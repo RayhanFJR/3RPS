@@ -354,7 +354,16 @@ void ControlHandler::processAutoRehab(SystemState& currentState, int& t_controll
     if (serialHandler.isTrajectoryPaused()) {
         return;  // Trajectory frozen — jangan kirim apapun
     }
-    
+
+    // === TIME GATE: kirim titik berikutnya hanya setelah JEDA_KONTROLER_MS ===
+    // Ini menggantikan peran waitingForWaypoint sebagai throttle.
+    // Tanpa ini, semua titik trajektori akan habis terkirim dalam < 1 detik.
+    auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - lastTraTime).count();
+    if (elapsed < JEDA_KONTROLER_MS) {
+        return;  // Belum waktunya kirim titik berikutnya
+    }
+
     int grafik_start = trajectoryManager.getGraphStartIndex();
     int grafik_end   = trajectoryManager.getGraphEndIndex();
     
