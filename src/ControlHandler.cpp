@@ -102,8 +102,7 @@ void ControlHandler::startRehabCycle(bool& animasi_grafik, int& t_controller, in
         rampUpPhase = false;
         rampUpIndex = 0;
     }
-    waitingForWaypoint = false;  // Siap kirim titik pertama
-    
+
     // Reset pause state saat start
     serialHandler.resetPauseState();
     
@@ -151,7 +150,6 @@ void ControlHandler::advanceToNextCycle(bool& animasi_grafik, int& t_controller,
         rampUpPhase = false;
         rampUpIndex = 0;
     }
-    waitingForWaypoint = false;  // Siap kirim titik pertama cycle baru
 }
 
 int ControlHandler::clampRetreatIndex(int controllerSteps) const {
