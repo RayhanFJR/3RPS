@@ -51,10 +51,7 @@ public:
                          std::chrono::steady_clock::time_point& lastTraTime,
                          std::chrono::steady_clock::time_point& delayStartTime);
     
-    // ACK-based waypoint control
-    void notifyWaypointReached();          // Dipanggil saat WAYPOINT_REACHED diterima
-    bool isWaitingForWaypoint() const { return waitingForWaypoint; }
-    
+
     // Cycle management
     int getTargetCycle() const { return target_cycle; }
     int getCurrentCycle() const { return current_cycle; }
@@ -83,10 +80,6 @@ private:
     bool retreatActive;
     int lastForwardIndex;
     bool autoReturnToIdle;
-    
-    // ACK-based waypoint control
-    bool waitingForWaypoint;    // Tunggu WAYPOINT_REACHED sebelum kirim titik berikutnya
-    std::chrono::steady_clock::time_point lastWaypointSentTime;  // Untuk timeout fallback
     
     // Ramp-up phase (traversal index 1 → gaitStart sebelum gait utama)
     bool rampUpPhase;           // true = sedang dalam fase ramp-up

@@ -12,8 +12,7 @@ ControlHandler::ControlHandler(ModbusHandler& modbus, SerialHandler& serial,
       target_cycle(1), current_cycle(0),
       retreatIndex(0), retreatTargetIndex(0), retreatActive(false), lastForwardIndex(0),
       autoReturnToIdle(false),
-      waitingForWaypoint(false), rampUpPhase(false), rampUpIndex(0) {
-    lastWaypointSentTime = std::chrono::steady_clock::now();
+      rampUpPhase(false), rampUpIndex(0) {
     initLogger();
 }
 
@@ -255,22 +254,12 @@ void ControlHandler::processArduinoFeedback(std::string& arduinoFeedbackState,
     serialHandler.processIncomingData(resultString);
     
     // === WAYPOINT_REACHED saat AUTO_RETREAT → retreat selesai ===
-    // Arduino sekarang kirim WAYPOINT_REACHED untuk semua kasus (forward & retreat)
-    // Bedakan via currentState: AUTO_RETREAT = retreat done, AUTO_REHAB = advance trajectory
     if (resultString.find("WAYPOINT_REACHED") != std::string::npos &&
         currentState == SystemState::AUTO_RETREAT) {
         serialHandler.sendCommand("RETREAT_COMPLETE");
         serialHandler.sendCommand("0");
         retreatActive = false;
         std::cout << "\n=== HOME POSITION REACHED - RETREAT COMPLETE ===" << std::endl;
-    }
-
-    // === WAYPOINT_REACHED saat AUTO_REHAB → kirim titik trajektori berikutnya ===
-    // ACK-based: Arduino konfirmasi motor sudah sampai sebelum mini PC kirim titik berikutnya
-    if (resultString.find("WAYPOINT_REACHED") != std::string::npos &&
-        currentState == SystemState::AUTO_REHAB) {
-        notifyWaypointReached();
-        std::cout << "[ACK] WAYPOINT_REACHED - kirim titik berikutnya" << std::endl;
     }
 
     // === Deteksi retreat dari Arduino (YANK_PAUSE atau eksplisit RETREAT) ===
@@ -368,25 +357,6 @@ void ControlHandler::processAutoRehab(SystemState& currentState, int& t_controll
         return;  // Trajectory frozen — jangan kirim apapun
     }
     
-    // === ACK-BASED + TIMEOUT FALLBACK ===
-    // Tunggu WAYPOINT_REACHED dari Arduino.
-    // Jika dalam WAYPOINT_ACK_TIMEOUT_MS tidak ada ACK, paksa lanjut ke titik berikutnya.
-    static const int WAYPOINT_ACK_TIMEOUT_MS = 200;  // 1.5 detik timeout
-    
-    if (waitingForWaypoint) {
-        auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::steady_clock::now() - lastWaypointSentTime).count();
-        
-        if (elapsed < WAYPOINT_ACK_TIMEOUT_MS) {
-            return;  // Masih dalam window ACK, tunggu dulu
-        }
-        
-        // Timeout! Motor tidak sampai dalam 3 detik — paksa lanjut
-        std::cout << "[TIMEOUT] Waypoint ACK timeout (" << elapsed
-                  << "ms) — paksa lanjut ke titik berikutnya" << std::endl;
-        waitingForWaypoint = false;  // Force advance
-    }
-    
     int grafik_start = trajectoryManager.getGraphStartIndex();
     int grafik_end   = trajectoryManager.getGraphEndIndex();
     
@@ -403,10 +373,8 @@ void ControlHandler::processAutoRehab(SystemState& currentState, int& t_controll
                 t_grafik = rampUpIndex;
             }
             
-            // Kirim waypoint ramp-up dan tunggu ACK (dengan timeout fallback)
+            // Kirim waypoint ramp-up langsung (time-based, tanpa tunggu ACK)
             sendControllerData(rampUpIndex);
-            waitingForWaypoint = true;
-            lastWaypointSentTime = std::chrono::steady_clock::now();
             rampUpIndex++;
             lastTraTime = std::chrono::steady_clock::now();
         } else {
@@ -431,10 +399,8 @@ void ControlHandler::processAutoRehab(SystemState& currentState, int& t_controll
             animasi_grafik = true;
         }
         
-        // Kirim waypoint dan set timer ACK
+        // Kirim waypoint langsung (time-based, tanpa tunggu ACK)
         sendControllerData(actual_index);
-        waitingForWaypoint = true;
-        lastWaypointSentTime = std::chrono::steady_clock::now();
         t_controller++;
         lastTraTime = std::chrono::steady_clock::now();
     } else {
@@ -444,9 +410,7 @@ void ControlHandler::processAutoRehab(SystemState& currentState, int& t_controll
     }
 }
 
-void ControlHandler::notifyWaypointReached() {
-    waitingForWaypoint = false;
-}
+// notifyWaypointReached: dihapus (tidak lagi digunakan, sistem ACK-based sudah dinonaktifkan)
 
 void ControlHandler::sendControllerData(int t) {
     // NOTE: sendCommand will automatically check pause state in SerialHandler

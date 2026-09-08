@@ -101,22 +101,9 @@ float yank            = 0.0;
 float F_prev          = 0.0;
 int   yankDebounceCount = 0;   // Counter debounce yank
 
-// ============================================================
-//  WAYPOINT FEEDBACK
-//  Arduino eksekusi waypoint → sampai → kirim WAYPOINT_REACHED
-//  Mini PC baru boleh kirim waypoint berikutnya
-// ============================================================
-const float WAYPOINT_TOL       = 3.0;   // mm — error dianggap "sampai"
-const long  WAYPOINT_SETTLE_MS = 50;    // ms — dikurangi dari 300ms agar kecepatan tidak turun
-                                        // (trajectory didesain cadence 100ms, 50ms settle = aman)
-
 // Anti-deadzone: motor tidak bisa start dari PWM sangat kecil karena static friction
 const int   MIN_MOTOR_PWM  = 30;        // PWM minimum agar motor bisa mulai bergerak
 const float ERR_DEADBAND   = 0.4;       // mm — error di bawah ini diabaikan (tidak perlu dikejar)
-
-bool  waypointActive    = false;   // Sedang tracking waypoint
-bool  waypointAckSent   = false;   // Sudah kirim WAYPOINT_REACHED?
-long  waypointReachedAt = 0;       // Kapan pertama kali masuk toleransi
 
 // ============================================================
 //  LOAD-BASED ADAPTIVE SCALING
@@ -196,12 +183,7 @@ bool retreatHasBeenTriggered = false;
 bool retreatRequestSent      = false;
 long yankPauseUntil          = 0;   // Soft pause setelah spike yank
 
-// Helper: reset semua state waypoint
-void resetWaypointState() {
-    waypointActive    = false;
-    waypointAckSent   = false;
-    waypointReachedAt = 0;
-}
+
 
 String receivedData = "";
 
@@ -413,10 +395,6 @@ void parseTrajectoryCommand(String data, bool isRetreat) {
         refVelo3 *= RETREAT_VELOCITY_SCALE;
     }
 
-    // Reset waypoint feedback state untuk titik baru
-    waypointActive    = true;
-    waypointAckSent   = false;
-    waypointReachedAt = 0;
 }
 
 void parseOuterLoopGains(String data) {
@@ -499,7 +477,6 @@ void resetSystem() {
     yankPauseUntil           = 0;
     yankDebounceCount        = 0;
 
-    resetWaypointState();
     stopAllMotors();
 
     // Re-tare load cell
@@ -990,29 +967,9 @@ void loop() {
             }
         }
 
-        // --- Waypoint reached check ---
-        // Cek apakah semua motor sudah dalam toleransi posisi
-        // Hanya kirim ACK jika: tidak sedang pause, manipulatorState running,
-        // dan belum kirim ACK untuk waypoint ini
-        if (waypointActive && !waypointAckSent
-            && !trajectoryPaused && manipulatorState == 0) {
-
-            bool inTol = (abs(ErrPos1) < WAYPOINT_TOL)
-                      && (abs(ErrPos2) < WAYPOINT_TOL)
-                      && (abs(ErrPos3) < WAYPOINT_TOL);
-
-            if (inTol && waypointReachedAt == 0) {
-                waypointReachedAt = now;          // Mulai settle timer
-            } else if (!inTol) {
-                waypointReachedAt = 0;            // Keluar toleransi, reset timer
-            }
-
-            if (waypointReachedAt > 0
-                && (now - waypointReachedAt) >= WAYPOINT_SETTLE_MS) {
-                Serial.println(F("WAYPOINT_REACHED"));
-                waypointAckSent = true;
-            }
-        }
+        // --- Waypoint reached: dihapus ---
+        // Pengiriman titik berikutnya sepenuhnya dikendalikan oleh mini PC (time-based).
+        // Arduino tidak lagi mengirim WAYPOINT_REACHED untuk maju ke trajektori selanjutnya.
 
         // --- Motor output ---
         (manipulatorState == 0) ? applyMotorControl() : stopAllMotors();
