@@ -929,8 +929,6 @@ void loop() {
             }
             else if (load <= FORCE_RESUME_THRESHOLD && trajectoryPaused) {
                 trajectoryPaused  = false;
-                waypointReachedAt = 0;   // Harus settle ulang sebelum kirim ACK
-                waypointAckSent   = false;
                 refPos1  = pausedRefPos1;  refPos2  = pausedRefPos2;  refPos3  = pausedRefPos3;
                 refVelo1 = pausedRefVelo1; refVelo2 = pausedRefVelo2; refVelo3 = pausedRefVelo3;
                 refFc1   = pausedRefFc1;   refFc2   = pausedRefFc2;   refFc3   = pausedRefFc3;
