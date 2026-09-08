@@ -8,7 +8,9 @@
 
 SerialHandler::SerialHandler(io_context& io) 
     : serial(io), io(io), isOpen(false), trajectoryPaused(false),
-      lastActPos1(-1.0f), lastActPos2(-1.0f), lastActPos3(-1.0f) {
+      lastActPos1(-1.0f), lastActPos2(-1.0f), lastActPos3(-1.0f),
+      csvStartTime(std::chrono::steady_clock::now()) {
+    initCsvLogger();
 }
 
 SerialHandler::~SerialHandler() {
@@ -68,16 +70,22 @@ bool SerialHandler::hasData() {
 
 std::string SerialHandler::readData() {
     if (!isOpen || !hasData()) return "";
-    
-    std::array<char, 256> buf;
-    boost::system::error_code error;
-    size_t len = serial.read_some(boost::asio::buffer(buf), error);
-    
-    if (len > 0 && !error) {
-        return std::string(buf.data(), len);
+
+    // Drain SELURUH buffer yang tersedia, bukan hanya satu chunk 256 byte.
+    // Ini mencegah Arduino serial buffer menumpuk saat mini PC terlambat baca,
+    // yang menyebabkan Serial.print() di Arduino blocking → program hang.
+    std::string result;
+    while (hasData()) {
+        std::array<char, 256> buf;
+        boost::system::error_code error;
+        size_t len = serial.read_some(boost::asio::buffer(buf), error);
+        if (len > 0 && !error) {
+            result.append(buf.data(), len);
+        } else {
+            break;
+        }
     }
-    
-    return "";
+    return result;
 }
 
 float SerialHandler::parseValue(const std::string& data, const std::string& key) {
@@ -95,7 +103,74 @@ float SerialHandler::parseValue(const std::string& data, const std::string& key)
     }
 }
 
+
+// ============================================================
+//  CSV TELEMETRY LOGGER
+// ============================================================
+
+void SerialHandler::initCsvLogger() {
+    // Buat nama file dengan timestamp: telemetry_YYYYMMDD_HHMMSS.csv
+    // Ini memungkinkan multiple sesi disimpan tanpa overwrite
+    auto now = std::chrono::system_clock::now();
+    std::time_t now_t = std::chrono::system_clock::to_time_t(now);
+    std::tm* tm = std::localtime(&now_t);
+    char buf[32];
+    std::strftime(buf, sizeof(buf), "telemetry_%Y%m%d_%H%M%S.csv", tm);
+
+    csvFile.open(buf);
+    if (!csvFile.is_open()) {
+        std::cerr << "[CSV] Gagal membuka file CSV: " << buf << std::endl;
+        return;
+    }
+
+    // Header CSV — urutan sesuai field yang di-parse di writeCsvRow()
+    csvFile << "timestamp_ms,state,mode,"
+            << "load,yank,"
+            << "p1,p2,p3,"
+            << "rp1,rp2,rp3,"
+            << "ep1,ep2,ep3,"
+            << "v1,v2,v3,"
+            << "c1,c2,c3,"
+            << "pwm1,pwm2,pwm3,"
+            << "K,B,Z,tpause\n";
+    csvFile.flush();
+    std::cout << "[CSV] Logging telemetri ke: " << buf << std::endl;
+}
+
+void SerialHandler::writeCsvRow(const std::string& line) {
+    if (!csvFile.is_open()) return;
+
+    // Timestamp dalam ms sejak program start
+    auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - csvStartTime).count();
+
+    // Helper lambda — parse float, default 0.0 jika tidak ada field
+    auto pv = [&](const std::string& key) -> float {
+        float v = parseValue(line, key);
+        return (v == -1.0f) ? 0.0f : v;
+    };
+
+    // Parse state dan mode (string fields)
+    std::string state = "run", mode = "fwd";
+    if (line.find("s:pause") != std::string::npos) state = "pause";
+    if (line.find("m:ret")   != std::string::npos) mode  = "ret";
+
+    csvFile << elapsed        << ","
+            << state          << "," << mode           << ","
+            << pv(",load:")   << "," << pv(",yank:")   << ","
+            << pv(",p1:")     << "," << pv(",p2:")     << "," << pv(",p3:")  << ","
+            << pv(",rp1:")    << "," << pv(",rp2:")    << "," << pv(",rp3:") << ","
+            << pv(",ep1:")    << "," << pv(",ep2:")    << "," << pv(",ep3:") << ","
+            << pv(",v1:")     << "," << pv(",v2:")     << "," << pv(",v3:")  << ","
+            << pv(",c1:")     << "," << pv(",c2:")     << "," << pv(",c3:")  << ","
+            << pv(",pwm1:")   << "," << pv(",pwm2:")   << "," << pv(",pwm3:") << ","
+            << pv(",K:")      << "," << pv(",B:")      << ","
+            << pv(",Z:")      << "," << pv(",tpause:") << "\n";
+    // Tidak flush setiap baris (terlalu lambat) — OS buffer cukup untuk telemetri 10Hz
+}
+
 void SerialHandler::processIncomingData(const std::string& chunk) {
+
     lineBuffer += chunk;
 
     size_t pos = 0;
@@ -125,6 +200,8 @@ void SerialHandler::processLine(const std::string& line) {
         if (p1 != -1.0f) lastActPos1 = p1;
         if (p2 != -1.0f) lastActPos2 = p2;
         if (p3 != -1.0f) lastActPos3 = p3;
+
+        writeCsvRow(line);  // Tulis baris ke CSV setiap ada telemetri lengkap
     }
 
     if (ENABLE_TELEMETRY_CONSOLE && line.compare(0, 2, "s:") == 0) {

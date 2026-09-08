@@ -3,6 +3,8 @@
 
 #include <boost/asio.hpp>
 #include <string>
+#include <fstream>
+#include <chrono>
 
 using namespace boost::asio;
 
@@ -19,6 +21,13 @@ private:
     float lastActPos1;
     float lastActPos2;
     float lastActPos3;
+
+    // CSV telemetry logger
+    std::ofstream csvFile;
+    std::chrono::steady_clock::time_point csvStartTime;  // t=0 untuk timestamp CSV
+
+    void initCsvLogger();           // Buka file CSV dan tulis header
+    void writeCsvRow(const std::string& line);  // Parse line + tulis 1 baris CSV
 
     void processLine(const std::string& line);
     void printTelemetryToConsole(const std::string& line);
