@@ -765,10 +765,16 @@ void loop() {
     // ----------------------------------------------------------
     //  WATCHDOG — Timeout jika host tiba-tiba tidak kirim data
     //  (fallback kalau USB tidak terdeteksi disconnect)
+    //
+    //  CATATAN: operatingMode == 2 (RETREAT) DIKECUALIKAN dari watchdog.
+    //  Retreat adalah operasi go-to-zero single-command (R0,0,0,...),
+    //  mini PC tidak kirim command tambahan selama retreat berlangsung.
+    //  Jika retreat ikut dicek, watchdog akan mematikan motor setelah
+    //  SERIAL_TIMEOUT_MS (3s) padahal retreat belum selesai.
     // ----------------------------------------------------------
     if (lastSerialRxTime > 0 &&
         (now - lastSerialRxTime) > SERIAL_TIMEOUT_MS &&
-        (operatingMode != 0 || manualCommand != 0)) {
+        (operatingMode == 1 || manualCommand != 0)) {   // Retreat (2) dikecualikan
         stopAllMotors();
         operatingMode = 0;
         manualCommand = 0;
