@@ -774,14 +774,26 @@ void loop() {
     //   - operatingMode == 2 (retreat): single-command, tidak butuh stream
     //   - manualCommand != 0 (manual): USB disconnect detection lebih
     //     reliable; watchdog 3s terlalu pendek untuk operasi manual
+    //   - trajectoryPaused == true (ADMITTANCE PAUSE): mini PC SENGAJA tidak
+    //     kirim S command saat platform ditahan — ini respons normal admittance,
+    //     bukan host crash. Watchdog HARUS dikecualikan agar operatingMode tidak
+    //     di-reset ke 0 (yang akan memberhentikan telemetri dan membekukan HMI).
     // ----------------------------------------------------------
+    if (trajectoryPaused) {
+        // Saat admittance pause aktif: reset watchdog timer secara berkala
+        // supaya begitu pause selesai (resume), watchdog mulai fresh.
+        lastSerialRxTime = now;
+    }
+
     if (lastSerialRxTime > 0 &&
         (now - lastSerialRxTime) > SERIAL_TIMEOUT_MS &&
-        operatingMode == 1) {   // Hanya forward trajectory
+        operatingMode == 1 &&
+        !trajectoryPaused) {   // Tambahan guard: jangan trigger saat admittance pause
         stopAllMotors();
         operatingMode = 0;
         manualCommand = 0;
         lastSerialRxTime = now;   // Reset agar tidak trigger berulang
+        Serial.println(F("HOST_TIMEOUT"));   // Beritahu mini PC penyebab stop
     }
 
     // ----------------------------------------------------------

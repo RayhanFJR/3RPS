@@ -14,6 +14,7 @@ private:
     io_context& io;
     bool isOpen;
     bool trajectoryPaused;
+    std::chrono::steady_clock::time_point pauseStartTime;  // Kapan pause dimulai (untuk timeout fallback)
     std::string lineBuffer;
 
     // Posisi aktual terbaru dari complete telemetry line (s:... format)
@@ -48,6 +49,9 @@ public:
     void processArduinoFeedback(const std::string& data);
     bool isTrajectoryPaused() const { return trajectoryPaused; }
     void resetPauseState() { trajectoryPaused = false; }
+    // Cek apakah pause sudah terlalu lama tanpa RESUME (timeout fallback)
+    // Harus dipanggil di main loop setiap iterasi saat trajectoryPaused == true
+    void checkPauseTimeout();
 
     // Getter posisi aktual terbaru (dari complete telemetry line)
     float getLastPos1() const { return lastActPos1; }

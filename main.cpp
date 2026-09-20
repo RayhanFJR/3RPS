@@ -79,6 +79,9 @@ int main() {
     while (true) {
         uint8_t query[MODBUS_TCP_MAX_ADU_LENGTH];
         int rc = modbusHandler.receive(query, MODBUS_TCP_MAX_ADU_LENGTH);
+        // rc > 0  : Modbus request diterima dari HMI
+        // rc == 0 : timeout (10ms) — normal, HMI tidak kirim apapun saat ini
+        // rc < 0  : error / disconnect — ditangani di ModbusHandler::receive()
         
         if (rc > 0) {
             modbus_mapping_t* mb_mapping = modbusHandler.getMapping();
@@ -135,9 +138,15 @@ int main() {
             modbusHandler.reply(query, rc);
         }
         
-        // === Process Arduino feedback (SINGLE READ) ===
-        // ControlHandler will handle BOTH load cell AND pause/resume signals
+        // === Process Arduino feedback — SELALU dibaca, tidak peduli status Modbus ===
+        // Ini critical: saat Modbus timeout (rc <= 0) pun, telemetri Arduino harus tetap
+        // dibaca agar buffer serial tidak numpuk dan agar pause/resume signal tidak terlewat.
         controlHandler.processArduinoFeedback(arduinoFeedbackState, currentState, t_controller);
+        
+        // === Pause timeout fallback — cegah mini PC stuck tidak kirim S command ===
+        // Jika RESUME_TRAJECTORY hilang di serial noise, timeout ini otomatis clear pause
+        // setelah 10 detik agar trajectory bisa dilanjutkan.
+        serialHandler.checkPauseTimeout();
         
         // === Process auto rehab (ACK-based, pause-aware) ===
         if (currentState == SystemState::AUTO_REHAB) {
@@ -161,7 +170,9 @@ int main() {
             }
         }
         
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        // Tidak perlu sleep — Modbus receive sudah ber-timeout 10ms,
+        // sehingga loop ini berjalan ~100Hz secara natural tanpa busy-wait.
+        // Sleep dihapus agar Arduino feedback tidak terlambat dibaca.
     }
     
     // Cleanup (never reached, but good practice)

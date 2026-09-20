@@ -8,6 +8,7 @@
 
 SerialHandler::SerialHandler(io_context& io) 
     : serial(io), io(io), isOpen(false), trajectoryPaused(false),
+      pauseStartTime(std::chrono::steady_clock::now()),
       lastActPos1(-1.0f), lastActPos2(-1.0f), lastActPos3(-1.0f),
       csvStartTime(std::chrono::steady_clock::now()) {
     initCsvLogger();
@@ -292,6 +293,10 @@ void SerialHandler::printEventLine(const std::string& line) {
 
 void SerialHandler::processArduinoFeedback(const std::string& data) {
     if (data.find("PAUSE_TRAJECTORY") != std::string::npos) {
+        if (!trajectoryPaused) {
+            // Catat waktu awal pause untuk timeout fallback
+            pauseStartTime = std::chrono::steady_clock::now();
+        }
         trajectoryPaused = true;
         std::cout << "[ADMITTANCE] Trajectory PAUSED (gaya eksternal terdeteksi)" << std::endl;
     }
@@ -303,5 +308,30 @@ void SerialHandler::processArduinoFeedback(const std::string& data) {
     if (data.find("RETREAT") != std::string::npos &&
         data.find("ACK_RETREAT") == std::string::npos) {
         std::cout << "[SAFETY] Retreat requested by Arduino" << std::endl;
+    }
+}
+
+void SerialHandler::checkPauseTimeout() {
+    // Timeout fallback: jika trajectoryPaused sudah aktif > PAUSE_TIMEOUT_MS
+    // tanpa menerima RESUME_TRAJECTORY (misal karena serial buffer noise),
+    // otomatis clear pause agar S command bisa kembali mengalir ke Arduino.
+    //
+    // Tanpa ini, jika RESUME_TRAJECTORY hilang di jalan, mini PC tidak pernah
+    // kirim S lagi → Arduino watchdog trigger → operatingMode = 0 → HMI hang.
+    //
+    // 10 detik dipilih lebih panjang dari gaya tunggu pasien terlama yang realistis
+    // (biasanya < 5 detik saat latihan), tapi cukup pendek agar tidak terlalu delay.
+    const long PAUSE_TIMEOUT_MS = 10000;  // 10 detik
+
+    if (!trajectoryPaused) return;
+
+    auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - pauseStartTime).count();
+
+    if (elapsed > PAUSE_TIMEOUT_MS) {
+        trajectoryPaused = false;
+        std::cout << "[ADMITTANCE] PAUSE TIMEOUT (" << elapsed
+                  << "ms) — auto-resume (RESUME_TRAJECTORY mungkin hilang di serial noise)"
+                  << std::endl;
     }
 }
