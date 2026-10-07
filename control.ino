@@ -120,7 +120,6 @@ const int   YANK_DEBOUNCE_REQ  = 3;     // Harus N kali berturut-turut sebelum t
 float yank            = 0.0;
 float F_prev          = 0.0;
 int   yankDebounceCount = 0;   // Counter debounce yank
-int   gradientPauseCount = 0;  // Counter debounce gradient pause
 
 // Anti-deadzone: motor tidak bisa start dari PWM sangat kecil karena static friction
 const int   MIN_MOTOR_PWM  = 30;        // PWM minimum agar motor bisa mulai bergerak
@@ -183,17 +182,16 @@ const float B_ADM_DEFAULT = 7272.0;    // Dipakai saat ADMITTANCE_RESET
 const float K_ADM_DEFAULT = 15556.0;
 
 // ============================================================
-//  TRAJECTORY PAUSE  (saat F_ext > FORCE_PAUSE_THRESHOLD)
+//  TRAJECTORY PAUSE  (berdasarkan Z_adm — virtual displacement admittance)
+//  Z_adm = output dari B*Ż + K*Z = F_ext (backward Euler)
+//  Merepresentasikan "seberapa jauh robot terdorong" oleh gaya eksternal.
+//  Lebih baik dari static threshold karena:
+//   - Gaya konstan → Z_adm tetap tinggi (dF/dt=0 tapi Z_adm ≠ 0)
+//   - Gaya spike sesaat → Z_adm belum sempat tumbuh (τ≈0.47s)
+//   - Resume otomatis saat Z_adm decay (gaya dilepas)
 // ============================================================
-const float FORCE_PAUSE_THRESHOLD  = 5.0;   // N (unit) — TIDAK LAGI DIPAKAI untuk trigger pause (diganti gradient)
-const float FORCE_RESUME_THRESHOLD = 2.5;   // N (unit) — resume (hysteresis) — MASIH DIPAKAI
-
-// Gradient force (dF/dt) sebagai trigger pause trajektori
-// Pause terjadi saat |yank| > threshold ini (debounced), artinya pasien
-// sedang aktif menekan/mendorong platform. Harus < THRESHOLD_YANK (55)
-// agar pause terjadi sebelum eskalasi ke retreat.
-const float GRADIENT_PAUSE_THRESHOLD = 20.0;  // N/s — |dF/dt| untuk trigger pause
-const int   GRADIENT_PAUSE_DEBOUNCE  = 2;     // Harus N kali berturut sebelum pause
+const float Z_PAUSE_MM  = 2.0;   // mm — Z_adm harus mencapai ini untuk pause
+const float Z_RESUME_MM = 0.5;   // mm — Z_adm turun ke sini untuk resume
 
 bool  trajectoryPaused = false;
 float pausedRefPos1  = 0.0, pausedRefPos2  = 0.0, pausedRefPos3  = 0.0;
@@ -504,7 +502,6 @@ void resetSystem() {
     trajectoryPaused         = false;
     yankPauseUntil           = 0;
     yankDebounceCount        = 0;
-    gradientPauseCount       = 0;
 
     stopAllMotors();
 
@@ -993,37 +990,32 @@ void loop() {
             float dt = INTERVAL_ADMITTANCE / 1000.0;
             updateAdmittanceControl(load, dt);
 
-            // Decay Z_adm saat gaya turun agar resume lebih cepat
-            if (load <= FORCE_RESUME_THRESHOLD) {
-                Z_adm      *= 0.92;
-                Z_adm_prev  = Z_adm;
-                Zdot_adm    = 0.0;
-            }
+            // Trajectory pause/resume berdasarkan Z_adm (virtual displacement)
+            // Z_adm merepresentasikan seberapa jauh robot "terdorong" gaya eksternal.
+            // PAUSE:  |Z_adm| > Z_PAUSE_MM  → gaya cukup besar/lama → pause
+            // RESUME: |Z_adm| ≤ Z_RESUME_MM → gaya sudah dilepas → resume
+            float Z_mm = abs(Z_adm) * 1000.0;  // m → mm (absolut)
 
-            // Trajectory pause/resume berdasarkan gradient force (dF/dt)
-            // PAUSE:  |yank| > GRADIENT_PAUSE_THRESHOLD (debounced)
-            // RESUME: load turun ke <= FORCE_RESUME_THRESHOLD (force-based, tetap)
-            if (abs(yank) > GRADIENT_PAUSE_THRESHOLD && !trajectoryPaused) {
-                gradientPauseCount++;
-                if (gradientPauseCount >= GRADIENT_PAUSE_DEBOUNCE) {
-                    trajectoryPaused = true;
-                    gradientPauseCount = 0;
-                    pausedRefPos1  = refPos1;  pausedRefPos2  = refPos2;  pausedRefPos3  = refPos3;
-                    pausedRefVelo1 = refVelo1; pausedRefVelo2 = refVelo2; pausedRefVelo3 = refVelo3;
-                    pausedRefFc1   = refFc1;   pausedRefFc2   = refFc2;   pausedRefFc3   = refFc3;
-                    Serial.println(F("PAUSE_TRAJECTORY"));
-                }
-            } else if (!trajectoryPaused) {
-                gradientPauseCount = 0;  // Reset jika tidak berturut-turut
+            if (Z_mm > Z_PAUSE_MM && !trajectoryPaused) {
+                trajectoryPaused = true;
+                pausedRefPos1  = refPos1;  pausedRefPos2  = refPos2;  pausedRefPos3  = refPos3;
+                pausedRefVelo1 = refVelo1; pausedRefVelo2 = refVelo2; pausedRefVelo3 = refVelo3;
+                pausedRefFc1   = refFc1;   pausedRefFc2   = refFc2;   pausedRefFc3   = refFc3;
+                Serial.println(F("PAUSE_TRAJECTORY"));
             }
-
-            if (load <= FORCE_RESUME_THRESHOLD && trajectoryPaused) {
+            else if (Z_mm <= Z_RESUME_MM && trajectoryPaused) {
                 trajectoryPaused  = false;
-                gradientPauseCount = 0;
                 refPos1  = pausedRefPos1;  refPos2  = pausedRefPos2;  refPos3  = pausedRefPos3;
                 refVelo1 = pausedRefVelo1; refVelo2 = pausedRefVelo2; refVelo3 = pausedRefVelo3;
                 refFc1   = pausedRefFc1;   refFc2   = pausedRefFc2;   refFc3   = pausedRefFc3;
                 Serial.println(F("RESUME_TRAJECTORY"));
+            }
+
+            // Decay Z_adm saat gaya rendah DAN tidak sedang pause, agar tidak stuck
+            if (Z_mm < Z_RESUME_MM && !trajectoryPaused) {
+                Z_adm      *= 0.92;
+                Z_adm_prev  = Z_adm;
+                Zdot_adm    = 0.0;
             }
 
             lastAdmittanceTime = now;
