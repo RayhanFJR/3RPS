@@ -120,6 +120,7 @@ const int   YANK_DEBOUNCE_REQ  = 3;     // Harus N kali berturut-turut sebelum t
 float yank            = 0.0;
 float F_prev          = 0.0;
 int   yankDebounceCount = 0;   // Counter debounce yank
+int   gradientPauseCount = 0;  // Counter debounce gradient pause
 
 // Anti-deadzone: motor tidak bisa start dari PWM sangat kecil karena static friction
 const int   MIN_MOTOR_PWM  = 30;        // PWM minimum agar motor bisa mulai bergerak
@@ -184,8 +185,15 @@ const float K_ADM_DEFAULT = 15556.0;
 // ============================================================
 //  TRAJECTORY PAUSE  (saat F_ext > FORCE_PAUSE_THRESHOLD)
 // ============================================================
-const float FORCE_PAUSE_THRESHOLD  = 5.0;   // N (unit) — pause trajectory
-const float FORCE_RESUME_THRESHOLD = 2.5;   // N (unit) — resume (hysteresis)
+const float FORCE_PAUSE_THRESHOLD  = 5.0;   // N (unit) — TIDAK LAGI DIPAKAI untuk trigger pause (diganti gradient)
+const float FORCE_RESUME_THRESHOLD = 2.5;   // N (unit) — resume (hysteresis) — MASIH DIPAKAI
+
+// Gradient force (dF/dt) sebagai trigger pause trajektori
+// Pause terjadi saat |yank| > threshold ini (debounced), artinya pasien
+// sedang aktif menekan/mendorong platform. Harus < THRESHOLD_YANK (55)
+// agar pause terjadi sebelum eskalasi ke retreat.
+const float GRADIENT_PAUSE_THRESHOLD = 20.0;  // N/s — |dF/dt| untuk trigger pause
+const int   GRADIENT_PAUSE_DEBOUNCE  = 2;     // Harus N kali berturut sebelum pause
 
 bool  trajectoryPaused = false;
 float pausedRefPos1  = 0.0, pausedRefPos2  = 0.0, pausedRefPos3  = 0.0;
@@ -496,6 +504,7 @@ void resetSystem() {
     trajectoryPaused         = false;
     yankPauseUntil           = 0;
     yankDebounceCount        = 0;
+    gradientPauseCount       = 0;
 
     stopAllMotors();
 
@@ -991,16 +1000,26 @@ void loop() {
                 Zdot_adm    = 0.0;
             }
 
-            // Trajectory pause/resume dengan hysteresis
-            if (load > FORCE_PAUSE_THRESHOLD && !trajectoryPaused) {
-                trajectoryPaused = true;
-                pausedRefPos1  = refPos1;  pausedRefPos2  = refPos2;  pausedRefPos3  = refPos3;
-                pausedRefVelo1 = refVelo1; pausedRefVelo2 = refVelo2; pausedRefVelo3 = refVelo3;
-                pausedRefFc1   = refFc1;   pausedRefFc2   = refFc2;   pausedRefFc3   = refFc3;
-                Serial.println(F("PAUSE_TRAJECTORY"));
+            // Trajectory pause/resume berdasarkan gradient force (dF/dt)
+            // PAUSE:  |yank| > GRADIENT_PAUSE_THRESHOLD (debounced)
+            // RESUME: load turun ke <= FORCE_RESUME_THRESHOLD (force-based, tetap)
+            if (abs(yank) > GRADIENT_PAUSE_THRESHOLD && !trajectoryPaused) {
+                gradientPauseCount++;
+                if (gradientPauseCount >= GRADIENT_PAUSE_DEBOUNCE) {
+                    trajectoryPaused = true;
+                    gradientPauseCount = 0;
+                    pausedRefPos1  = refPos1;  pausedRefPos2  = refPos2;  pausedRefPos3  = refPos3;
+                    pausedRefVelo1 = refVelo1; pausedRefVelo2 = refVelo2; pausedRefVelo3 = refVelo3;
+                    pausedRefFc1   = refFc1;   pausedRefFc2   = refFc2;   pausedRefFc3   = refFc3;
+                    Serial.println(F("PAUSE_TRAJECTORY"));
+                }
+            } else if (!trajectoryPaused) {
+                gradientPauseCount = 0;  // Reset jika tidak berturut-turut
             }
-            else if (load <= FORCE_RESUME_THRESHOLD && trajectoryPaused) {
+
+            if (load <= FORCE_RESUME_THRESHOLD && trajectoryPaused) {
                 trajectoryPaused  = false;
+                gradientPauseCount = 0;
                 refPos1  = pausedRefPos1;  refPos2  = pausedRefPos2;  refPos3  = pausedRefPos3;
                 refVelo1 = pausedRefVelo1; refVelo2 = pausedRefVelo2; refVelo3 = pausedRefVelo3;
                 refFc1   = pausedRefFc1;   refFc2   = pausedRefFc2;   refFc3   = pausedRefFc3;
