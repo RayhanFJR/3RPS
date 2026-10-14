@@ -149,49 +149,57 @@ float Z_adm      = 0.0;   // Virtual displacement (m)
 float Zdot_adm   = 0.0;   // Virtual velocity (m/s)
 float Z_adm_prev = 0.0;
 
-// K & B STATIS — konstan selama runtime, tidak lagi fungsi dari F_ext/aktivasi.
-// Diturunkan dari Hill-Zajac (Zajac 1989) di SATU titik operasi tetap, berdasarkan
+// K & B diturunkan dari Hill-Zajac (Zajac 1989) di SATU titik operasi tetap, berdasarkan
 // ROM latihan aktual robot (dorsofleksi 20.3-29.8°, plantarfleksi 37.6-45.8°):
 //
-//   K = (a*F0/l0) * fL'(l~) * fv(0)
-//   B = (a*F0/Vmax) * fL(l~) * |fv'(0)|
+//   K = a * (F0/l0) * fL'(l~) * fv(0)     →  K = a * K_BASE
+//   B = a * (F0/Vmax) * fL(l~) * |fv'(0)|  →  B = a * B_BASE
 //
-//   fL(l~)  = exp(-(l~-1)^2 / Kact),           Kact = 0.5   (Thelen 2003 / OpenSim)
-//   fv(v~)  = Af(1+Af)/(v~+Af) - Af,            Af   = 0.3   -> fv'(0) = -4.333
+//   K_BASE dan B_BASE dihitung pada a=1.0 (lihat docs/admittance.md untuk detail).
+//   Aktivasi `a` adalah pengali linear — mengubah seberapa kaku/lembek robot,
+//   tanpa mengubah kecepatan respons (τ = B/K tetap sama karena `a` cancel).
 //
-//   l~ dihitung dari ROM: Δl = r*Δθ*g  (r=moment arm, Δθ=setengah total sweep
-//   ROM=33.375°=0.5826rad, g=faktor gearing tendon->fascicle)
-//   Parameter (Delp 1990 untuk F0/l0; Maganaris 1999 untuk moment arm r;
-//   Hoang et al. untuk gearing triceps surae ~27-35% krn Achilles tendon compliant):
-//     Tibialis Anterior : F0=603N,  l0=0.098m,  r=0.035m, g=1.0  -> l~=0.792
-//     Triceps Surae     : F0=4440N, l0=0.0375m, r=0.050m, g=0.30 -> l~=0.767
-//     (TA tendon relatif kaku -> g~1; Achilles tendon panjang & lentur -> g~0.3,
-//      tanpa koreksi ini l~ jatuh ke 0.22, di luar jangkauan valid kurva fL Gaussian)
-//   a (aktivasi nominal) = 0.3, Vmax = 10*l0/s (asumsi Zajac/Winters)
+//   K_BASE = 15556 / 0.3 ≈ 51853  N/m      (rata-rata TA + triceps surae, a=1)
+//   B_BASE = 7272  / 0.3 ≈ 24240  N·s/m    (rata-rata TA + triceps surae, a=1)
 //
-//   Hasil: K_TA=1410, K_tri=29703 N/m | B_TA=734, B_tri=13810 N.s/m
-//   -> K_adm ≈ 15556 N/m, B_adm ≈ 7272 N.s/m, tau=B/K ≈ 0.47s
-//
-//   Tune manual di sini kalau ROM/asumsi berubah, atau runtime via
-//   serial: ADM,K,<val> / ADM,B,<val>. Valid selama load cell terkalibrasi ke N
-//   dan Z_adm konsisten dalam meter (dikonversi ke mm hanya di calculateCTCWithAdmittance).
-float B_adm = 7272.0;   // Virtual damping  (N.s/m)
-float K_adm = 15556.0;  // Virtual stiffness (N/m)
+//   Tune `activation` via serial: ADM,A,<val> (range 0.0-1.0)
+//   Atau override K/B langsung: ADM,K,<val> / ADM,B,<val>
+const float K_BASE = 51853.3;   // N/m   — base stiffness (a=1.0, konstan)
+const float B_BASE = 24240.0;   // N·s/m — base damping   (a=1.0, konstan)
+const float ACTIVATION_DEFAULT = 0.3;  // Dipakai saat ADMITTANCE_RESET
 
-const float B_ADM_DEFAULT = 7272.0;    // Dipakai saat ADMITTANCE_RESET
-const float K_ADM_DEFAULT = 15556.0;
+float activation = ACTIVATION_DEFAULT;  // Aktivasi otot (0.0-1.0), tunable runtime
+
+// K_adm dan B_adm efektif — dihitung dari activation × BASE
+// Diupdate otomatis saat activation berubah (via recalcAdmittanceKB)
+float K_adm = ACTIVATION_DEFAULT * K_BASE;   // = 15556 N/m    (default a=0.3)
+float B_adm = ACTIVATION_DEFAULT * B_BASE;   // = 7272  N·s/m  (default a=0.3)
+
+// Helper: hitung ulang K_adm dan B_adm dari activation × BASE
+void recalcAdmittanceKB() {
+    K_adm = activation * K_BASE;
+    B_adm = activation * B_BASE;
+}
 
 // ============================================================
-//  TRAJECTORY PAUSE  (berdasarkan Z_adm — virtual displacement admittance)
-//  Z_adm = output dari B*Ż + K*Z = F_ext (backward Euler)
-//  Merepresentasikan "seberapa jauh robot terdorong" oleh gaya eksternal.
-//  Lebih baik dari static threshold karena:
-//   - Gaya konstan → Z_adm tetap tinggi (dF/dt=0 tapi Z_adm ≠ 0)
-//   - Gaya spike sesaat → Z_adm belum sempat tumbuh (τ≈0.47s)
-//   - Resume otomatis saat Z_adm decay (gaya dilepas)
+//  TRAJECTORY PAUSE  (berdasarkan Gradient Force — dF/dt)
+//  Gradient dihitung dari force yang sudah di-EMA smooth.
+//  Pause saat gradient melewati threshold (user tekan cepat/kuat),
+//  Resume saat gradient turun (user lepas).
+//
+//  EMA smoothing mencegah noise load cell menghasilkan gradient palsu.
+//  Hysteresis (pause ≠ resume threshold) mencegah chattering.
+//  Debounce memastikan trigger bukan dari spike sesaat.
 // ============================================================
-const float Z_PAUSE_MM  = 2.0;   // mm — Z_adm harus mencapai ini untuk pause
-const float Z_RESUME_MM = 0.5;   // mm — Z_adm turun ke sini untuk resume
+const float GRAD_SMOOTH_ALPHA     = 0.3;    // EMA factor untuk smooth force
+const float GRAD_PAUSE_THRESHOLD  = 15.0;   // unit/s — gradient untuk trigger pause
+const float GRAD_RESUME_THRESHOLD = 3.0;    // unit/s — gradient untuk resume
+const int   GRAD_DEBOUNCE_REQ     = 3;      // Harus N kali berturut sebelum trigger
+
+float smoothedForce     = 0.0;   // Force setelah EMA smoothing
+float prevSmoothedForce = 0.0;   // Smoothed force di iterasi sebelumnya
+float gradientForce     = 0.0;   // dF/dt dari smoothed force
+int   gradDebounceCount = 0;     // Counter debounce gradient pause
 
 bool  trajectoryPaused = false;
 float pausedRefPos1  = 0.0, pausedRefPos2  = 0.0, pausedRefPos3  = 0.0;
@@ -346,7 +354,8 @@ void updateAdmittanceControl(float F_external, float dt) {
 void resetAdmittance() {
     Z_adm = 0.0; Z_adm_prev = 0.0;
     Zdot_adm = 0.0;
-    K_adm = K_ADM_DEFAULT; B_adm = B_ADM_DEFAULT;
+    activation = ACTIVATION_DEFAULT;
+    recalcAdmittanceKB();
     yank = 0.0; F_prev = 0.0;
     yankPauseUntil = 0;
 }
@@ -462,8 +471,9 @@ void parseInnerLoopGains(String data) {
 }
 
 void parseAdmittanceParams(String data) {
-    // Format: ADM,G,<val>  |  ADM,K,<val>  |  ADM,B,<val>
-    // K & B statis (time-invariant), tunable manual via serial ini.
+    // Format: ADM,G,<val>  |  ADM,K,<val>  |  ADM,B,<val>  |  ADM,A,<val>
+    // A = aktivasi otot (0.0-1.0), mengubah K dan B secara proporsional
+    // K & B juga bisa di-override langsung (tanpa lewat aktivasi)
     data.replace("ADM", "");
     int c = data.indexOf(',');
     String param = data.substring(0, c);
@@ -472,14 +482,20 @@ void parseAdmittanceParams(String data) {
     if (param == "G") {
         admittanceGain = val;
         Serial.print("Admittance gain = "); Serial.println(admittanceGain);
+    } else if (param == "A") {
+        activation = constrain(val, 0.01, 1.0);  // Min 0.01 agar K/B tidak nol
+        recalcAdmittanceKB();
+        Serial.print("Activation = "); Serial.print(activation, 3);
+        Serial.print(" -> K="); Serial.print(K_adm, 1);
+        Serial.print(" B="); Serial.println(B_adm, 1);
     } else if (param == "K") {
         K_adm = val;
-        Serial.print("Admittance K (statis) = "); Serial.println(K_adm);
+        Serial.print("Admittance K (override) = "); Serial.println(K_adm);
     } else if (param == "B") {
         B_adm = val;
-        Serial.print("Admittance B (statis) = "); Serial.println(B_adm);
+        Serial.print("Admittance B (override) = "); Serial.println(B_adm);
     } else {
-        Serial.println("ERR: Unknown ADM param. Use ADM,G / ADM,K / ADM,B ,<val>");
+        Serial.println("ERR: Unknown ADM param. Use ADM,G / ADM,A / ADM,K / ADM,B ,<val>");
     }
 }
 
@@ -677,11 +693,13 @@ void sendTelemetry() {
     Serial.print(F(",pwm2:")); Serial.print(controlValue2, 0);
     Serial.print(F(",pwm3:")); Serial.print(controlValue3, 0);
     if (isAdmittanceActive()) {
+        Serial.print(F(",a:"));    Serial.print(activation, 3);
         Serial.print(F(",K:"));    Serial.print(K_adm, 2);
         Serial.print(F(",B:"));    Serial.print(B_adm, 2);
         Serial.print(F(",tau:"));  Serial.print(B_adm / K_adm, 4);
         Serial.print(F(",Z:"));    Serial.print(Z_adm * 1000, 3);
         Serial.print(F(",Zd:"));   Serial.print(Zdot_adm * 1000, 3);
+        Serial.print(F(",gF:"));   Serial.print(gradientForce, 2);
         Serial.print(F(",tpause:")); Serial.print(trajectoryPaused ? 1 : 0);
     }
     Serial.println();
@@ -914,8 +932,11 @@ void loop() {
                 else if (receivedData == "ADMITTANCE_STATUS") {
                     Serial.println(F("\n=== Admittance Status ==="));
                     Serial.print(F("Enabled    : ")); Serial.println(admittanceEnabled ? "YES" : "NO");
-                    Serial.print(F("K_adm      : ")); Serial.print(K_adm, 2); Serial.println(F(" N/m (statis)"));
-                    Serial.print(F("B_adm      : ")); Serial.print(B_adm, 2); Serial.println(F(" N.s/m (statis)"));
+                    Serial.print(F("Activation : ")); Serial.print(activation, 3); Serial.println(F(" (0.0-1.0)"));
+                    Serial.print(F("K_BASE     : ")); Serial.print(K_BASE, 1); Serial.println(F(" N/m (konstan)"));
+                    Serial.print(F("B_BASE     : ")); Serial.print(B_BASE, 1); Serial.println(F(" N.s/m (konstan)"));
+                    Serial.print(F("K_adm      : ")); Serial.print(K_adm, 2); Serial.println(F(" N/m (a*K_BASE)"));
+                    Serial.print(F("B_adm      : ")); Serial.print(B_adm, 2); Serial.println(F(" N.s/m (a*B_BASE)"));
                     Serial.print(F("tau (B/K)  : ")); Serial.print(B_adm / K_adm, 4); Serial.println(F(" s"));
                     Serial.print(F("Z_adm      : ")); Serial.print(Z_adm * 1000, 4); Serial.println(F(" mm"));
                     Serial.print(F("Zdot_adm   : ")); Serial.print(Zdot_adm * 1000, 4); Serial.println(F(" mm/s"));
@@ -990,32 +1011,39 @@ void loop() {
             float dt = INTERVAL_ADMITTANCE / 1000.0;
             updateAdmittanceControl(load, dt);
 
-            // Trajectory pause/resume berdasarkan Z_adm (virtual displacement)
-            // Z_adm merepresentasikan seberapa jauh robot "terdorong" gaya eksternal.
-            // PAUSE:  |Z_adm| > Z_PAUSE_MM  → gaya cukup besar/lama → pause
-            // RESUME: |Z_adm| ≤ Z_RESUME_MM → gaya sudah dilepas → resume
-            float Z_mm = abs(Z_adm) * 1000.0;  // m → mm (absolut)
+            // Trajectory pause/resume berdasarkan Gradient Force (dF/dt)
+            // Gradient dihitung dari smoothed force (EMA) agar noise tidak trigger
+            // PAUSE:  |gradient| > GRAD_PAUSE_THRESHOLD  → user tekan cepat → pause
+            // RESUME: |gradient| ≤ GRAD_RESUME_THRESHOLD → gaya tenang → resume
+            float dt_grad = INTERVAL_ADMITTANCE / 1000.0;  // 0.01s
+            smoothedForce = GRAD_SMOOTH_ALPHA * load + (1.0 - GRAD_SMOOTH_ALPHA) * smoothedForce;
+            gradientForce = (smoothedForce - prevSmoothedForce) / dt_grad;
+            prevSmoothedForce = smoothedForce;
 
-            if (Z_mm > Z_PAUSE_MM && !trajectoryPaused) {
-                trajectoryPaused = true;
-                pausedRefPos1  = refPos1;  pausedRefPos2  = refPos2;  pausedRefPos3  = refPos3;
-                pausedRefVelo1 = refVelo1; pausedRefVelo2 = refVelo2; pausedRefVelo3 = refVelo3;
-                pausedRefFc1   = refFc1;   pausedRefFc2   = refFc2;   pausedRefFc3   = refFc3;
-                Serial.println(F("PAUSE_TRAJECTORY"));
+            float absGrad = abs(gradientForce);
+
+            if (absGrad > GRAD_PAUSE_THRESHOLD && !trajectoryPaused) {
+                gradDebounceCount++;
+                if (gradDebounceCount >= GRAD_DEBOUNCE_REQ) {
+                    trajectoryPaused = true;
+                    gradDebounceCount = 0;
+                    pausedRefPos1  = refPos1;  pausedRefPos2  = refPos2;  pausedRefPos3  = refPos3;
+                    pausedRefVelo1 = refVelo1; pausedRefVelo2 = refVelo2; pausedRefVelo3 = refVelo3;
+                    pausedRefFc1   = refFc1;   pausedRefFc2   = refFc2;   pausedRefFc3   = refFc3;
+                    Serial.print(F("PAUSE_TRAJECTORY gF="));
+                    Serial.println(gradientForce, 2);
+                }
+            } else if (!trajectoryPaused) {
+                gradDebounceCount = 0;   // Reset jika tidak berturut
             }
-            else if (Z_mm <= Z_RESUME_MM && trajectoryPaused) {
+
+            if (absGrad <= GRAD_RESUME_THRESHOLD && trajectoryPaused) {
                 trajectoryPaused  = false;
+                gradDebounceCount = 0;
                 refPos1  = pausedRefPos1;  refPos2  = pausedRefPos2;  refPos3  = pausedRefPos3;
                 refVelo1 = pausedRefVelo1; refVelo2 = pausedRefVelo2; refVelo3 = pausedRefVelo3;
                 refFc1   = pausedRefFc1;   refFc2   = pausedRefFc2;   refFc3   = pausedRefFc3;
                 Serial.println(F("RESUME_TRAJECTORY"));
-            }
-
-            // Decay Z_adm saat gaya rendah DAN tidak sedang pause, agar tidak stuck
-            if (Z_mm < Z_RESUME_MM && !trajectoryPaused) {
-                Z_adm      *= 0.92;
-                Z_adm_prev  = Z_adm;
-                Zdot_adm    = 0.0;
             }
 
             lastAdmittanceTime = now;
@@ -1047,10 +1075,6 @@ void loop() {
                 lastPDCalcTime = now;
             }
         }
-
-        // --- Waypoint reached: dihapus ---
-        // Pengiriman titik berikutnya sepenuhnya dikendalikan oleh mini PC (time-based).
-        // Arduino tidak lagi mengirim WAYPOINT_REACHED untuk maju ke trajektori selanjutnya.
 
         // --- Motor output ---
         (manipulatorState == 0) ? applyMotorControl() : stopAllMotors();
