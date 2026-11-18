@@ -8,6 +8,9 @@
 
 using namespace boost::asio;
 
+// Forward declaration
+class CLIHandler;
+
 class SerialHandler {
 private:
     serial_port serial;
@@ -26,6 +29,9 @@ private:
     // CSV telemetry logger
     std::ofstream csvFile;
     std::chrono::steady_clock::time_point csvStartTime;  // t=0 untuk timestamp CSV
+
+    // CLI handler for experiment mode tagging
+    CLIHandler* cliHandler;
 
     void initCsvLogger();           // Buka file CSV dan tulis header
     void writeCsvRow(const std::string& line);  // Parse line + tulis 1 baris CSV
@@ -57,6 +63,9 @@ public:
     float getLastPos1() const { return lastActPos1; }
     float getLastPos2() const { return lastActPos2; }
     float getLastPos3() const { return lastActPos3; }
+
+    // CLI handler reference for CSV mode tagging
+    void setCLIHandler(CLIHandler* cli) { cliHandler = cli; }
 };
 
 #endif // SERIALHANDLER_H

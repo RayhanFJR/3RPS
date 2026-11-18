@@ -16,6 +16,7 @@
 #include "include/GraphManager.h"
 #include "include/ControlHandler.h"
 #include "include/StateHandlers.h"
+#include "include/CLIHandler.h"
 
 #include <boost/asio.hpp>
 #include <modbus/modbus.h>
@@ -53,6 +54,13 @@ int main() {
     
     // Initialize control handler
     ControlHandler controlHandler(modbusHandler, serialHandler, trajectoryManager, graphManager);
+    
+    // Initialize CLI experiment controller
+    CLIHandler cli(serialHandler);
+    cli.start();
+    
+    // Pass CLI reference to SerialHandler for CSV mode tagging
+    serialHandler.setCLIHandler(&cli);
     
     // System state
     SystemState currentState = SystemState::IDLE;
@@ -148,6 +156,9 @@ int main() {
         // setelah 10 detik agar trajectory bisa dilanjutkan.
         serialHandler.checkPauseTimeout();
         
+        // === Process CLI commands dari terminal operator ===
+        cli.processQueuedCommands();
+        
         // === Process auto rehab (ACK-based, pause-aware) ===
         if (currentState == SystemState::AUTO_REHAB) {
             // processAutoRehab menangani:
@@ -176,6 +187,7 @@ int main() {
     }
     
     // Cleanup (never reached, but good practice)
+    cli.stop();
     modbusHandler.close();
     serialHandler.close();
     

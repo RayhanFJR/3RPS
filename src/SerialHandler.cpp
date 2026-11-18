@@ -1,4 +1,5 @@
 #include "SerialHandler.h"
+#include "CLIHandler.h"
 #include "Config.h"
 #include <iostream>
 #include <iomanip>
@@ -10,7 +11,8 @@ SerialHandler::SerialHandler(io_context& io)
     : serial(io), io(io), isOpen(false), trajectoryPaused(false),
       pauseStartTime(std::chrono::steady_clock::now()),
       lastActPos1(-1.0f), lastActPos2(-1.0f), lastActPos3(-1.0f),
-      csvStartTime(std::chrono::steady_clock::now()) {
+      csvStartTime(std::chrono::steady_clock::now()),
+      cliHandler(nullptr) {
     initCsvLogger();
 }
 
@@ -133,7 +135,8 @@ void SerialHandler::initCsvLogger() {
             << "v1,v2,v3,"
             << "c1,c2,c3,"
             << "pwm1,pwm2,pwm3,"
-            << "K,B,Z,tpause\n";
+            << "K,B,Z,tpause,"
+            << "adm_mode\n";
     csvFile.flush();
     std::cout << "[CSV] Logging telemetri ke: " << buf << std::endl;
 }
@@ -166,7 +169,8 @@ void SerialHandler::writeCsvRow(const std::string& line) {
             << pv(",c1:")     << "," << pv(",c2:")     << "," << pv(",c3:")  << ","
             << pv(",pwm1:")   << "," << pv(",pwm2:")   << "," << pv(",pwm3:") << ","
             << pv(",K:")      << "," << pv(",B:")      << ","
-            << pv(",Z:")      << "," << pv(",tpause:") << "\n";
+            << pv(",Z:")      << "," << pv(",tpause:") << ","
+            << (cliHandler ? cliHandler->getCurrentModeTag() : "UNKNOWN") << "\n";
     // Tidak flush setiap baris (terlalu lambat) — OS buffer cukup untuk telemetri 10Hz
 }
 
