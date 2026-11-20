@@ -125,12 +125,11 @@ Setiap folder `data_X/` harus berisi:
 
 ### 4. Konfigurasi Path Data
 
-Edit `main.cpp` jika path data berbeda:
+Path data default diset ke `"data"` di `main.cpp`:
 
 ```cpp
-// Line 28 di main.cpp
-if (!trajectoryManager.loadAllTrajectoryData("../data")) {
-    // Ubah path sesuai lokasi data Anda
+if (!trajectoryManager.loadAllTrajectoryData("data")) {
+    // Ubah path sesuai lokasi data Anda jika berbeda
 }
 ```
 

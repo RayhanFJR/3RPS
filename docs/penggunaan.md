@@ -195,10 +195,21 @@ Jumlah cycle dapat dibaca dari register `JUMLAH_CYCLE` (132).
 ### Reset dari Emergency Stop
 
 1. Pastikan kondisi aman
-2. Set register `RESET` (105) ke `1`
+2. Set register `RESET` (105) ke `1` dari HMI (atau ketik `reset` di CLI)
 3. Sistem akan masuk ke state `RESETTING`
-4. Command "R" dikirim ke Arduino
+4. Command "X" dikirim ke Arduino untuk me-reset sistem
 5. Sistem kembali ke state `IDLE`
+
+## Penggunaan CLI Terminal (Experiment Mode)
+
+Saat program `mainhmi` berjalan, terminal mini PC menyediakan prompt CLI (`>`) interaktif untuk mengubah mode kendali tanpa perlu menghentikan sistem:
+
+- **Matikan Admittance**: Ketik `admittance off` (pengujian posisi murni tanpa respon fleksibilitas).
+- **Nyalakan Admittance**: Ketik `admittance on` (pengujian interaksi dengan model Hill-Zajac).
+- **Cek Status**: Ketik `status` atau `admittance status`.
+- **Tuning Parameter**: Ketik `set activation <0.01-1.0>`, `set k <nilai>`, `set b <nilai>`.
+
+Setiap sesi telemetri otomatis dicatat di `telemetry_YYYYMMDD_HHMMSS.csv` dengan penanda `adm_mode` (`ADM_ON` / `ADM_OFF`). Detail lengkap panduan CLI dapat dilihat di [cli.md](cli.md).
 
 ## Monitoring dan Debugging
 
@@ -282,6 +293,8 @@ Edit di `include/Config.h` sesuai kebutuhan.
 
 ## Next Steps
 
-- [Struktur Modul](STRUCTURE.md) - Memahami detail implementasi
-- [Index](index.md) - Kembali ke halaman utama
+- [Panduan CLI & Eksperimen](cli.md) - Detail perintah terminal CLI & logging CSV
+- [Penurunan Model Admittance](admittance.md) - Penurunan parameter K & B model Hill-Zajac
+- [Struktur Modul](STRUCTURE.md) - Memahami detail implementasi modul
+- [Index](index.md) - Kembali ke halaman utama dokumentasi
 

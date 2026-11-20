@@ -2,94 +2,60 @@
 
 ## Selamat Datang
 
-Dokumentasi ini menjelaskan sistem kontrol rehabilitasi 3RPS versi modular. Sistem ini dirancang untuk mengontrol platform rehabilitasi 3RPS dengan komunikasi Modbus TCP untuk HMI dan komunikasi serial untuk Arduino.
+Dokumentasi ini menjelaskan sistem kontrol rehabilitasi robot paralel 3-RPS versi modular. Sistem ini dirancang untuk mengontrol platform rehabilitasi pergelangan kaki (*ankle rehabilitation*) dengan komunikasi **Modbus TCP** untuk HMI, komunikasi **serial** dengan Arduino, integrasi **Admittance Control** (model Hill-Zajac), serta **CLI Experiment Controller** di mini PC untuk pengujian komparatif (*with vs. without admittance*).
 
-## Daftar Isi
+---
 
-1. [Instalasi](instalasi.md) - Panduan instalasi dan setup sistem
-2. [Penggunaan](penggunaan.md) - Panduan penggunaan sistem
-3. [Struktur Modul](STRUCTURE.md) - Dokumentasi struktur modul dan arsitektur
+## 📚 Daftar Isi
 
-## Overview Sistem
+1. [Panduan Instalasi](instalasi.md) - Panduan instalasi dependensi dan kompilasi sistem
+2. [Panduan Penggunaan](penggunaan.md) - Panduan penggunaan sistem via HMI dan alur rehabilitasi
+3. [Panduan CLI & Eksperimen](cli.md) - Panduan pengoperasian terminal CLI dan pengujian untuk paper
+4. [Penurunan Kontrol Admittance](admittance.md) - Penurunan matematis kekakuan ($K$) dan redaman ($B$) virtual Hill-Zajac
+5. [Struktur Modul & Arsitektur](STRUCTURE.md) - Dokumentasi modul, kelas, dan diagram alur data
 
-Sistem Kontrol Rehabilitasi 3RPS Modular adalah aplikasi C++ yang mengontrol platform rehabilitasi dengan fitur-fitur berikut:
+---
+
+## 🎯 Overview Sistem
+
+Sistem Kontrol Rehabilitasi 3RPS Modular adalah aplikasi C++ performa tinggi yang berjalan di mini PC dengan fitur-fitur utama:
 
 ### Fitur Utama
 
-- **Multi-Trajectory Support**: Mendukung 3 trajectory berbeda yang dapat dipilih secara dinamis
-- **Modbus TCP Communication**: Komunikasi dengan HMI melalui Modbus TCP
-- **Serial Communication**: Komunikasi dengan Arduino untuk kontrol motor
-- **State Machine**: Sistem state machine untuk mengelola alur kontrol
-- **Real-time Graph**: Update grafik real-time di HMI
-- **Cycle Counter**: Penghitung siklus rehabilitasi
-- **Emergency Stop**: Fitur emergency stop untuk keamanan
+- **Multi-Trajectory Support**: Mendukung 3 trajektori latihan rehabilitasi berbeda yang dapat dipilih secara dinamis dari HMI.
+- **Admittance Control (Hill-Zajac)**: Kontrol admittance orde pertama ($M=0$) dengan nilai kekakuan ($K$) dan redaman ($B$) berbasis model muskuloskeletal aktual.
+- **CLI Experiment Controller**: Antarmuka terminal interaktif di mini PC untuk *toggle* admittance ON/OFF secara instan saat *runtime*.
+- **Automatic CSV Telemetry Logging**: Pencatatan telemetri 10 Hz ke CSV lengkap dengan tag `ADM_ON` / `ADM_OFF` untuk mempermudah analisis data paper.
+- **Modbus TCP Communication**: Server Modbus TCP untuk komunikasi dua arah dengan HMI (register kendali, grafik referensi, dan animasi aktual).
+- **Serial Communication (USB CDC)**: Komunikasi serial stabil dengan Arduino Leonardo pada baud rate 115200.
+- **Safety & Auto-Retreat**: Deteksi hentakan tiba-tiba (*yank* $dF/dt$), batas gaya, dan mekanisme *go-to-zero retreat* otomatis jika terjadi anomali beban.
+- **Emergency Stop & Recovery**: Penanganan E-stop baik dari HMI maupun CLI terminal.
 
-### Komponen Sistem
+---
 
-1. **TrajectoryManager**: Mengelola data trajectory (posisi, kecepatan, force)
-2. **SerialHandler**: Menangani komunikasi serial dengan Arduino
-3. **ModbusHandler**: Menangani komunikasi Modbus dengan HMI
-4. **GraphManager**: Mengelola data grafik untuk HMI
-5. **ControlHandler**: Logika kontrol sistem
-6. **StateHandlers**: Handler untuk state machine
+## 🧩 Komponen Sistem
 
-### Arsitektur
+1. **TrajectoryManager**: Mengelola pemuatan (*loading*) dan pemilihan trajektori dari file data (`pos`, `velo`, `fc`, `grafik`).
+2. **SerialHandler**: Menangani komunikasi serial USB dengan Arduino, parsing data telemetri, dan pencatatan CSV.
+3. **CLIHandler**: Mengelola input operator dari terminal mini PC dalam thread terpisah (*thread-safe command queue*).
+4. **ModbusHandler**: Server Modbus TCP untuk pertukaran data dengan HMI.
+5. **GraphManager**: Mengelola buffer data grafik referensi (CH0) dan animasi real-time (CH1) di HMI.
+6. **ControlHandler**: Logika kontrol alur rehabilitasi, transisi siklus, dan urutan *retreat*.
+7. **StateHandlers**: Logika eksekusi pada setiap state mesin (*IDLE*, *AUTO_REHAB*, *AUTO_RETREAT*, *POST_REHAB_DELAY*, *RESETTING*).
 
-Sistem menggunakan arsitektur modular dengan pemisahan tanggung jawab yang jelas:
+---
 
-```
-Main Loop
-    ↓
-ModbusHandler (receive)
-    ↓
-StateHandlers (process state)
-    ↓
-ControlHandler (control logic)
-    ↓
-SerialHandler (send to Arduino)
-    ↓
-GraphManager (update HMI)
-    ↓
-TrajectoryManager (get data)
-```
+## ⚡ Quick Start
 
-## Persyaratan Sistem
-
-- **OS**: Linux (disarankan Ubuntu/Debian)
-- **Compiler**: GCC dengan dukungan C++11
-- **Dependencies**: 
-  - libmodbus
-  - Boost (asio, system)
-  - pthread
-
-## Quick Start
-
-1. Install dependencies (lihat [Instalasi](instalasi.md))
-2. Compile program dengan `make`
-3. Pastikan data trajectory ada di folder `../data/`
-4. Jalankan program dengan `./mainhmi`
-
-## Struktur Data
-
-Sistem memerlukan data trajectory yang disimpan dalam struktur berikut:
-
-```
-data/
-├── data_1/
-│   ├── pos1.txt, pos2.txt, pos3.txt
-│   ├── velo1.txt, velo2.txt, velo3.txt
-│   ├── fc1.txt, fc2.txt, fc3.txt
-│   └── grafik.txt
-├── data_2/
-│   └── (struktur sama)
-└── data_3/
-    └── (struktur sama)
-```
-
-## Kontak dan Dukungan
-
-Untuk pertanyaan atau masalah, silakan lihat dokumentasi lengkap di:
-- [Instalasi](instalasi.md) - Setup dan konfigurasi
-- [Penggunaan](penggunaan.md) - Cara menggunakan sistem
-- [Struktur Modul](STRUCTURE.md) - Detail arsitektur
-
+1. Hubungkan Arduino ke port USB mini PC (default: `/dev/ttyACM0`).
+2. Buka terminal di folder proyek:
+   ```bash
+   make clean
+   make
+   ./mainhmi
+   ```
+3. Di terminal yang sama, gunakan perintah CLI seperti:
+   - `admittance off` (untuk uji tanpa admittance)
+   - `admittance on` (untuk uji dengan admittance)
+   - `status` (melihat mode aktif)
+4. Jalankan siklus rehabilitasi dari panel HMI.
