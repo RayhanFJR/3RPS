@@ -1,0 +1,16 @@
+cat << 'EOF' > .gitignore
+# Virtual Environment
+venv/
+.venv/
+env/
+
+# File cache & kompilasi Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# File pengaturan editor / OS
+.vscode/
+.DS_Store
+Thumbs.db
+EOF
