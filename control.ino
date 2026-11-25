@@ -121,6 +121,18 @@ float yank            = 0.0;
 float F_prev          = 0.0;
 int   yankDebounceCount = 0;   // Counter debounce yank
 
+// ============================================================
+//  THRESHOLD-BASED SAFETY (CTC-only mode, admittance OFF)
+//  T1 = pause saat beban tinggi, T2 = retreat saat beban sangat tinggi
+//  Aktif HANYA saat admittanceEnabled == false && isAutoMotion()
+// ============================================================
+float loadThreshold1 = 30.0;    // Pause threshold (unit beban)
+float loadThreshold2 = 60.0;    // Retreat threshold (unit beban)
+const float THRESH_RESUME_RATIO = 0.5;  // Resume saat load < T1 × ratio (hysteresis)
+int   threshPauseDebounce   = 0;
+int   threshRetreatDebounce = 0;
+const int THRESH_DEBOUNCE_REQ = 3;  // Harus 3× berturut sebelum trigger
+
 // Anti-deadzone: motor tidak bisa start dari PWM sangat kecil karena static friction
 const int   MIN_MOTOR_PWM  = 30;        // PWM minimum agar motor bisa mulai bergerak
 const float ERR_DEADBAND   = 0.4;       // mm — error di bawah ini diabaikan (tidak perlu dikejar)
@@ -270,6 +282,7 @@ long lastCTCCalcTime    = 0;
 long lastPDCalcTime     = 0;
 long lastAdmittanceTime = 0;
 long lastTelemTime      = 0;
+long lastThresholdTime  = 0;   // Threshold check interval (CTC-only mode)
 long lastSerialRxTime   = 0;   // Watchdog: last time any serial byte was received
 
 // ============================================================
@@ -535,6 +548,8 @@ void resetSystem() {
     prevError1 = 0.0; prevError2 = 0.0; prevError3 = 0.0;
 
     resetAdmittance();
+    threshPauseDebounce = 0;
+    threshRetreatDebounce = 0;
 
     Serial.println("System Reset OK");
 }
@@ -700,6 +715,11 @@ void sendTelemetry() {
         Serial.print(F(",Z:"));    Serial.print(Z_adm * 1000, 3);
         Serial.print(F(",Zd:"));   Serial.print(Zdot_adm * 1000, 3);
         Serial.print(F(",gF:"));   Serial.print(gradientForce, 2);
+        Serial.print(F(",tpause:")); Serial.print(trajectoryPaused ? 1 : 0);
+    }
+    if (!admittanceEnabled) {
+        Serial.print(F(",T1:"));     Serial.print(loadThreshold1, 1);
+        Serial.print(F(",T2:"));     Serial.print(loadThreshold2, 1);
         Serial.print(F(",tpause:")); Serial.print(trajectoryPaused ? 1 : 0);
     }
     Serial.println();
@@ -943,7 +963,19 @@ void loop() {
                     Serial.print(F("F_ext      : ")); Serial.print(latestValidLoad, 2); Serial.println(F(" unit"));
                     Serial.print(F("Yank       : ")); Serial.print(yank, 2); Serial.println(F(" unit/s"));
                     Serial.print(F("Yank thresh: ")); Serial.print(THRESHOLD_YANK, 1); Serial.println(F(" unit/s"));
+                    Serial.print(F("Thresh T1  : ")); Serial.print(loadThreshold1, 1); Serial.println(F(" unit (pause)"));
+                    Serial.print(F("Thresh T2  : ")); Serial.print(loadThreshold2, 1); Serial.println(F(" unit (retreat)"));
                     Serial.println(F("=========================\n"));
+                }
+
+                // --- Threshold commands (CTC-only safety) ---
+                else if (receivedData.startsWith("T") && receivedData.indexOf(',') > 0) {
+                    String data = receivedData.substring(1);
+                    int comma = data.indexOf(',');
+                    loadThreshold1 = data.substring(0, comma).toFloat();
+                    loadThreshold2 = data.substring(comma + 1).toFloat();
+                    Serial.print(F("Threshold T1=")); Serial.print(loadThreshold1, 1);
+                    Serial.print(F(" T2=")); Serial.println(loadThreshold2, 1);
                 }
 
                 else {
@@ -1047,6 +1079,62 @@ void loop() {
             }
 
             lastAdmittanceTime = now;
+        }
+
+        // --- Threshold-based safety (CTC-only mode, admittance OFF) ---
+        // Aktif HANYA saat admittanceEnabled == false (CTC murni)
+        // T1: pause trajectory saat beban > T1
+        // T2: retreat ke home saat beban > T2
+        // Resume otomatis saat beban < T1 × THRESH_RESUME_RATIO
+        if (!admittanceEnabled && isAutoMotion() &&
+            now - lastThresholdTime >= INTERVAL_LOAD) {
+
+            float load = latestValidLoad;
+            readLoadCellIfReady(load);
+
+            // Prioritas: T2 (retreat) > T1 (pause)
+            if (load > loadThreshold2 && !retreatHasBeenTriggered) {
+                threshRetreatDebounce++;
+                if (threshRetreatDebounce >= THRESH_DEBOUNCE_REQ) {
+                    // Trigger retreat via YANK_PAUSE signal (mini PC handle retreat)
+                    Serial.print(F("YANK_PAUSE load="));
+                    Serial.print(load, 2);
+                    Serial.print(F(" > T2="));
+                    Serial.println(loadThreshold2, 1);
+                    threshRetreatDebounce = 0;
+                    threshPauseDebounce = 0;
+                }
+            }
+            else if (load > loadThreshold1 && !trajectoryPaused) {
+                threshPauseDebounce++;
+                if (threshPauseDebounce >= THRESH_DEBOUNCE_REQ) {
+                    trajectoryPaused = true;
+                    threshPauseDebounce = 0;
+                    pausedRefPos1  = refPos1;  pausedRefPos2  = refPos2;  pausedRefPos3  = refPos3;
+                    pausedRefVelo1 = refVelo1; pausedRefVelo2 = refVelo2; pausedRefVelo3 = refVelo3;
+                    pausedRefFc1   = refFc1;   pausedRefFc2   = refFc2;   pausedRefFc3   = refFc3;
+                    Serial.print(F("PAUSE_TRAJECTORY load="));
+                    Serial.print(load, 2);
+                    Serial.print(F(" > T1="));
+                    Serial.println(loadThreshold1, 1);
+                }
+            }
+            else if (trajectoryPaused && load <= loadThreshold1 * THRESH_RESUME_RATIO) {
+                trajectoryPaused  = false;
+                threshPauseDebounce = 0;
+                threshRetreatDebounce = 0;
+                refPos1  = pausedRefPos1;  refPos2  = pausedRefPos2;  refPos3  = pausedRefPos3;
+                refVelo1 = pausedRefVelo1; refVelo2 = pausedRefVelo2; refVelo3 = pausedRefVelo3;
+                refFc1   = pausedRefFc1;   refFc2   = pausedRefFc2;   refFc3   = pausedRefFc3;
+                Serial.println(F("RESUME_TRAJECTORY"));
+            }
+            else {
+                // Load di antara threshold — reset debounce yang tidak aktif
+                if (load <= loadThreshold1) threshPauseDebounce = 0;
+                if (load <= loadThreshold2) threshRetreatDebounce = 0;
+            }
+
+            lastThresholdTime = now;
         }
 
         // --- Encoder (only when running) ---

@@ -8,8 +8,10 @@
 
 CLIHandler::CLIHandler(SerialHandler& serial, ModbusHandler& modbus)
     : serialHandler(serial), modbusHandler(modbus),
-      running(false), admittanceOn(true) {
+      running(false), admittanceOn(true),
+      currentT1(30.0f), currentT2(60.0f) {
     // Default: admittance ON (sesuai default Arduino: admittanceEnabled = true)
+    // Default threshold: T1=30, T2=60 (sesuai default Arduino)
 }
 
 CLIHandler::~CLIHandler() {
@@ -164,6 +166,22 @@ void CLIHandler::executeCommand(const std::string& input) {
         serialHandler.sendCommand("ADMITTANCE_STATUS");
     }
 
+    // ========== Threshold Control (CTC-only mode) ==========
+    else if (input.compare(0, 10, "threshold ") == 0) {
+        std::istringstream iss(input.substr(10));
+        float t1, t2;
+        if (iss >> t1 >> t2) {
+            currentT1 = t1;
+            currentT2 = t2;
+            std::ostringstream oss;
+            oss << "T" << t1 << "," << t2;
+            serialHandler.sendCommand(oss.str());
+            std::cout << "[CLI] Threshold T1=" << t1 << " T2=" << t2 << " dikirim" << std::endl;
+        } else {
+            std::cout << "[CLI] Usage: threshold <T1> <T2>  (contoh: threshold 30 60)" << std::endl;
+        }
+    }
+
     // ========== Parameter Tuning ==========
     else if (input.compare(0, 4, "set ") == 0) {
         parseAndSendParam(input);
@@ -229,8 +247,24 @@ void CLIHandler::parseAndSendParam(const std::string& input) {
     else if (param == "gain" || param == "g") {
         arduinoCmd = "ADM,G," + valStr;
     }
+    else if (param == "t1") {
+        currentT1 = val;
+        std::ostringstream oss;
+        oss << "T" << currentT1 << "," << currentT2;
+        serialHandler.sendCommand(oss.str());
+        std::cout << "[CLI] Threshold T1=" << currentT1 << " T2=" << currentT2 << " dikirim" << std::endl;
+        return;
+    }
+    else if (param == "t2") {
+        currentT2 = val;
+        std::ostringstream oss;
+        oss << "T" << currentT1 << "," << currentT2;
+        serialHandler.sendCommand(oss.str());
+        std::cout << "[CLI] Threshold T2=" << currentT2 << " T1=" << currentT1 << " dikirim" << std::endl;
+        return;
+    }
     else {
-        std::cout << "[CLI] Unknown param: '" << param << "'. Use: activation, K, B, gain" << std::endl;
+        std::cout << "[CLI] Unknown param: '" << param << "'. Use: activation, K, B, gain, t1, t2" << std::endl;
         return;
     }
 
@@ -245,6 +279,8 @@ void CLIHandler::printStatus() {
     std::cout << "  Admittance mode  : " << (admittanceOn.load() ? "ON (WITH admittance)" : "OFF (WITHOUT admittance)") << std::endl;
     std::cout << "  CSV tag          : " << getCurrentModeTag() << std::endl;
     std::cout << "  Telemetri console: " << (serialHandler.isTelemetryConsoleEnabled() ? "ON" : "OFF") << std::endl;
+    std::cout << "  Threshold T1     : " << currentT1 << " (pause)" << std::endl;
+    std::cout << "  Threshold T2     : " << currentT2 << " (retreat)" << std::endl;
     std::cout << "  (Ketik 'admittance status' untuk detail K/B/Z dari Arduino)" << std::endl;
     std::cout << "-------------------------\n" << std::endl;
 }
@@ -273,6 +309,9 @@ void CLIHandler::printHelp() {
     std::cout << "  set K <v>           Override stiffness K (N/m)" << std::endl;
     std::cout << "  set B <v>           Override damping B (N.s/m)" << std::endl;
     std::cout << "  set gain <v>        Set admittance gain" << std::endl;
+    std::cout << "  set t1 <v>          Set pause threshold (CTC-only mode)" << std::endl;
+    std::cout << "  set t2 <v>          Set retreat threshold (CTC-only mode)" << std::endl;
+    std::cout << "  threshold <t1> <t2> Set kedua threshold sekaligus" << std::endl;
     std::cout << std::endl;
     std::cout << "System:" << std::endl;
     std::cout << "  status / mode       Print current experiment mode" << std::endl;

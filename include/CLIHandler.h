@@ -34,6 +34,10 @@ private:
     std::atomic<bool> running;
     std::atomic<bool> admittanceOn;   // Track mode for CSV tag
 
+    // Threshold tracking (CTC-only mode, saat admittance OFF)
+    float currentT1;   // Current pause threshold
+    float currentT2;   // Current retreat threshold
+
     std::queue<std::string> commandQueue;
     std::mutex queueMutex;
 
