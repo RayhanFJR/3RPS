@@ -33,6 +33,9 @@ private:
     // CLI handler for experiment mode tagging
     CLIHandler* cliHandler;
 
+    // Runtime toggle for telemetry console output
+    bool telemetryConsoleEnabled;
+
     void initCsvLogger();           // Buka file CSV dan tulis header
     void writeCsvRow(const std::string& line);  // Parse line + tulis 1 baris CSV
 
@@ -58,6 +61,10 @@ public:
     // Cek apakah pause sudah terlalu lama tanpa RESUME (timeout fallback)
     // Harus dipanggil di main loop setiap iterasi saat trajectoryPaused == true
     void checkPauseTimeout();
+
+    // Telemetry console toggle (CSV logging tetap jalan)
+    void setTelemetryConsole(bool enabled) { telemetryConsoleEnabled = enabled; }
+    bool isTelemetryConsoleEnabled() const { return telemetryConsoleEnabled; }
 
     // Getter posisi aktual terbaru (dari complete telemetry line)
     float getLastPos1() const { return lastActPos1; }

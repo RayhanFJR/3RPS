@@ -12,7 +12,8 @@ SerialHandler::SerialHandler(io_context& io)
       pauseStartTime(std::chrono::steady_clock::now()),
       lastActPos1(-1.0f), lastActPos2(-1.0f), lastActPos3(-1.0f),
       csvStartTime(std::chrono::steady_clock::now()),
-      cliHandler(nullptr) {
+      cliHandler(nullptr),
+      telemetryConsoleEnabled(ENABLE_TELEMETRY_CONSOLE) {
     initCsvLogger();
 }
 
@@ -209,7 +210,7 @@ void SerialHandler::processLine(const std::string& line) {
         writeCsvRow(line);  // Tulis baris ke CSV setiap ada telemetri lengkap
     }
 
-    if (ENABLE_TELEMETRY_CONSOLE && line.compare(0, 2, "s:") == 0) {
+    if (telemetryConsoleEnabled && line.compare(0, 2, "s:") == 0) {
         printTelemetryToConsole(line);
         return;
     }

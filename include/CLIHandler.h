@@ -9,10 +9,11 @@
 
 // Forward declarations
 class SerialHandler;
+class ModbusHandler;
 
 class CLIHandler {
 public:
-    CLIHandler(SerialHandler& serial);
+    CLIHandler(SerialHandler& serial, ModbusHandler& modbus);
     ~CLIHandler();
 
     void start();   // Launch stdin reader thread
@@ -27,6 +28,7 @@ public:
 
 private:
     SerialHandler& serialHandler;
+    ModbusHandler& modbusHandler;
 
     std::thread readerThread;
     std::atomic<bool> running;
