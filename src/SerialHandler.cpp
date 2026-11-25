@@ -13,7 +13,8 @@ SerialHandler::SerialHandler(io_context& io)
       lastActPos1(-1.0f), lastActPos2(-1.0f), lastActPos3(-1.0f),
       csvStartTime(std::chrono::steady_clock::now()),
       cliHandler(nullptr),
-      telemetryConsoleEnabled(ENABLE_TELEMETRY_CONSOLE) {
+      telemetryConsoleEnabled(ENABLE_TELEMETRY_CONSOLE),
+      inStatusBlock(false) {
     initCsvLogger();
 }
 
@@ -261,6 +262,35 @@ void SerialHandler::printTelemetryToConsole(const std::string& line) {
 }
 
 void SerialHandler::printEventLine(const std::string& line) {
+    // --- Multi-line status block handling ---
+    // Arduino ADMITTANCE_STATUS mengirim blok multi-line:
+    //   === Admittance Status ===
+    //   Enabled    : YES
+    //   K_adm      : 15556.00 N/m
+    //   ...
+    //   =========================
+    // Tanpa flag ini, hanya baris pertama (yang mengandung "Admittance") yang lolos
+    // filter pattern di bawah — sisanya di-drop. inStatusBlock memastikan SEMUA
+    // baris dalam blok ditampilkan ke console.
+
+    // Deteksi awal blok status
+    if (line.find("=== Admittance Status ===") != std::string::npos) {
+        inStatusBlock = true;
+        std::cout << "[ARDUINO] " << line << std::endl;
+        return;
+    }
+
+    // Sedang dalam blok status — tampilkan semua baris
+    if (inStatusBlock) {
+        std::cout << "[ARDUINO] " << line << std::endl;
+        // Deteksi akhir blok (baris yang isinya hanya '=' berulang)
+        if (line.find("=========================") != std::string::npos) {
+            inStatusBlock = false;
+        }
+        return;
+    }
+
+    // --- Normal event filtering ---
     if (line == "READY") {
         std::cout << "[ARDUINO] Sistem siap (telemetri via mini PC)" << std::endl;
     }

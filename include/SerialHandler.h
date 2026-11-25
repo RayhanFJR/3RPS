@@ -36,6 +36,9 @@ private:
     // Runtime toggle for telemetry console output
     bool telemetryConsoleEnabled;
 
+    // Flag: sedang menerima blok multi-line dari Arduino (e.g. ADMITTANCE_STATUS)
+    bool inStatusBlock;
+
     void initCsvLogger();           // Buka file CSV dan tulis header
     void writeCsvRow(const std::string& line);  // Parse line + tulis 1 baris CSV
 
