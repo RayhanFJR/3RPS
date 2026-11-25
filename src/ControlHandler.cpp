@@ -262,16 +262,21 @@ void ControlHandler::processArduinoFeedback(std::string& arduinoFeedbackState,
     // === Deteksi retreat dari Arduino (YANK_PAUSE atau eksplisit RETREAT) ===
     // HARUS dicek SEBELUM position check agar tidak salah langsung complete
     // saat posisi kebetulan dekat 0 di awal rehab bersamaan dengan YANK event.
+    //
+    // CATATAN PENTING: Guard !isTrajectoryPaused() DIHAPUS.
+    // Sebelumnya, retreat diblokir saat admittance pause aktif dengan asumsi
+    // bahwa itu respons normal. Namun admittance pause (gradientForce, interval
+    // 10ms, threshold 15 unit/s) SELALU ter-trigger lebih cepat dari yank
+    // detection (interval 100ms, threshold 55 unit/s), sehingga retreat
+    // tidak pernah bisa ter-trigger dalam praktik.
+    //
+    // YANK_PAUSE (55 unit/s, 3x debounce) sudah cukup ketat — jika Arduino
+    // sampai mengirim YANK_PAUSE, itu berarti lonjakan beban benar-benar
+    // signifikan dan harus di-retreat, terlepas dari status admittance pause.
     bool retreatTriggered = false;
 
     if (resultString.find("YANK_PAUSE") != std::string::npos &&
-        currentState == SystemState::AUTO_REHAB &&
-        !serialHandler.isTrajectoryPaused()) {
-        // Guard: hanya trigger retreat jika admittance TIDAK sedang pause.
-        // Saat user menahan beban (force > FORCE_PAUSE_THRESHOLD), admittance
-        // pause sudah aktif — ini respons normal, bukan kondisi darurat.
-        // YANK pada momen pertama kali user tekan akan selalu tinggi, jadi
-        // kalau admittance pause aktif, biarkan admittance yang handle.
+        currentState == SystemState::AUTO_REHAB) {
         std::cout << "\n!!! YANK SPIKE — TRIGGERING GO-TO-ZERO RETREAT !!!" << std::endl;
         retreatTriggered = true;
     }
