@@ -56,7 +56,7 @@ int main() {
     ControlHandler controlHandler(modbusHandler, serialHandler, trajectoryManager, graphManager);
     
     // Initialize CLI experiment controller
-    CLIHandler cli(serialHandler);
+    CLIHandler cli(serialHandler, modbusHandler);
     cli.start();
     
     // Pass CLI reference to SerialHandler for CSV mode tagging

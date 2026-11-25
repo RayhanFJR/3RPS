@@ -1,11 +1,14 @@
 #include "CLIHandler.h"
 #include "SerialHandler.h"
+#include "ModbusHandler.h"
+#include "Config.h"
 #include <iostream>
 #include <sstream>
 #include <algorithm>
 
-CLIHandler::CLIHandler(SerialHandler& serial)
-    : serialHandler(serial), running(false), admittanceOn(true) {
+CLIHandler::CLIHandler(SerialHandler& serial, ModbusHandler& modbus)
+    : serialHandler(serial), modbusHandler(modbus),
+      running(false), admittanceOn(true) {
     // Default: admittance ON (sesuai default Arduino: admittanceEnabled = true)
 }
 
@@ -37,6 +40,7 @@ void CLIHandler::readerLoop() {
     std::cout << "\n=========================================" << std::endl;
     std::cout << "  CLI EXPERIMENT CONTROLLER" << std::endl;
     std::cout << "  Ketik 'help' untuk daftar command" << std::endl;
+    std::cout << "  Ketik 'telem off' untuk mode CLI bersih" << std::endl;
     std::cout << "=========================================" << std::endl;
     std::cout << "> " << std::flush;
 
@@ -57,7 +61,6 @@ void CLIHandler::readerLoop() {
 
         if (lower == "quit" || lower == "exit") {
             std::cout << "[CLI] Shutting down..." << std::endl;
-            // Kirim stop command ke Arduino
             {
                 std::lock_guard<std::mutex> lock(queueMutex);
                 commandQueue.push("__QUIT__");
@@ -81,7 +84,6 @@ void CLIHandler::processQueuedCommands() {
         commandQueue.pop();
 
         if (cmd == "__QUIT__") {
-            // Graceful shutdown: stop motor dan exit
             serialHandler.sendCommand("0");
             std::cout << "[CLI] Motor stopped. Program exiting." << std::endl;
             exit(0);
@@ -92,8 +94,58 @@ void CLIHandler::processQueuedCommands() {
 }
 
 void CLIHandler::executeCommand(const std::string& input) {
+    // ========== Telemetry Toggle ==========
+    if (input == "telem off" || input == "telemetry off") {
+        serialHandler.setTelemetryConsole(false);
+        std::cout << "[CLI] Telemetri console OFF (CSV tetap logging)" << std::endl;
+    }
+    else if (input == "telem on" || input == "telemetry on") {
+        serialHandler.setTelemetryConsole(true);
+        std::cout << "[CLI] Telemetri console ON" << std::endl;
+    }
+
+    // ========== Rehab Control (via Modbus registers) ==========
+    else if (input == "start") {
+        modbusHandler.writeRegister(ModbusAddr::START, 1);
+        std::cout << "[CLI] START rehab dikirim (via Modbus register)" << std::endl;
+    }
+    else if (input == "calibrate") {
+        modbusHandler.writeRegister(ModbusAddr::CALIBRATE, 1);
+        std::cout << "[CLI] CALIBRATE dikirim" << std::endl;
+    }
+    else if (input == "trajectory 1" || input == "traj 1") {
+        modbusHandler.writeRegister(ModbusAddr::TRAJEKTORI_1, 1);
+        std::cout << "[CLI] Trajectory 1 dipilih" << std::endl;
+    }
+    else if (input == "trajectory 2" || input == "traj 2") {
+        modbusHandler.writeRegister(ModbusAddr::TRAJEKTORI_2, 1);
+        std::cout << "[CLI] Trajectory 2 dipilih" << std::endl;
+    }
+    else if (input == "trajectory 3" || input == "traj 3") {
+        modbusHandler.writeRegister(ModbusAddr::TRAJEKTORI_3, 1);
+        std::cout << "[CLI] Trajectory 3 dipilih" << std::endl;
+    }
+    else if (input.compare(0, 6, "cycle ") == 0) {
+        try {
+            int n = std::stoi(input.substr(6));
+            if (n < 1) n = 1;
+            modbusHandler.writeRegister(ModbusAddr::JUMLAH_CYCLE, n);
+            std::cout << "[CLI] Target cycle = " << n << std::endl;
+        } catch (...) {
+            std::cout << "[CLI] Usage: cycle <jumlah>" << std::endl;
+        }
+    }
+    else if (input == "forward" || input == "fwd") {
+        modbusHandler.writeRegister(ModbusAddr::MANUAL_MAJU, 1);
+        std::cout << "[CLI] Manual FORWARD" << std::endl;
+    }
+    else if (input == "reverse" || input == "rev") {
+        modbusHandler.writeRegister(ModbusAddr::MANUAL_MUNDUR, 1);
+        std::cout << "[CLI] Manual REVERSE" << std::endl;
+    }
+
     // ========== Admittance Control ==========
-    if (input == "admittance on") {
+    else if (input == "admittance on") {
         serialHandler.sendCommand("ADMITTANCE_ON");
         admittanceOn.store(true);
         std::cout << "[CLI] Admittance ON — mode: WITH admittance" << std::endl;
@@ -105,7 +157,7 @@ void CLIHandler::executeCommand(const std::string& input) {
     }
     else if (input == "admittance reset") {
         serialHandler.sendCommand("ADMITTANCE_RESET");
-        admittanceOn.store(true);  // Reset ke default (ON)
+        admittanceOn.store(true);
         std::cout << "[CLI] Admittance RESET to defaults (K=15556, B=7272, a=0.3)" << std::endl;
     }
     else if (input == "admittance status") {
@@ -124,19 +176,17 @@ void CLIHandler::executeCommand(const std::string& input) {
     else if (input == "help") {
         printHelp();
     }
-
-    // ========== Direct Arduino Commands (advanced) ==========
     else if (input == "reset") {
         serialHandler.sendCommand("X");
         std::cout << "[CLI] System RESET sent to Arduino" << std::endl;
     }
     else if (input == "emergency" || input == "estop") {
-        serialHandler.sendCommand("E");
-        std::cout << "[CLI] EMERGENCY STOP sent to Arduino" << std::endl;
+        modbusHandler.writeRegister(ModbusAddr::EMERGENCY, 1);
+        std::cout << "[CLI] EMERGENCY STOP" << std::endl;
     }
     else if (input == "stop") {
-        serialHandler.sendCommand("0");
-        std::cout << "[CLI] Motor STOP sent to Arduino" << std::endl;
+        modbusHandler.writeRegister(ModbusAddr::MANUAL_STOP, 1);
+        std::cout << "[CLI] Motor STOP" << std::endl;
     }
 
     // ========== Unknown ==========
@@ -146,7 +196,6 @@ void CLIHandler::executeCommand(const std::string& input) {
 }
 
 void CLIHandler::parseAndSendParam(const std::string& input) {
-    // Format: "set <param> <value>"
     std::istringstream iss(input);
     std::string cmd, param, valStr;
     iss >> cmd >> param >> valStr;
@@ -156,7 +205,6 @@ void CLIHandler::parseAndSendParam(const std::string& input) {
         return;
     }
 
-    // Validasi value
     float val;
     try {
         val = std::stof(valStr);
@@ -189,21 +237,32 @@ void CLIHandler::parseAndSendParam(const std::string& input) {
     serialHandler.sendCommand(arduinoCmd);
     std::cout << "[CLI] Sent to Arduino: " << arduinoCmd << std::endl;
 
-    // Suppress unused warning
     (void)val;
 }
 
 void CLIHandler::printStatus() {
     std::cout << "\n--- Experiment Status ---" << std::endl;
-    std::cout << "  Admittance mode : " << (admittanceOn.load() ? "ON (WITH admittance)" : "OFF (WITHOUT admittance)") << std::endl;
-    std::cout << "  CSV tag         : " << getCurrentModeTag() << std::endl;
+    std::cout << "  Admittance mode  : " << (admittanceOn.load() ? "ON (WITH admittance)" : "OFF (WITHOUT admittance)") << std::endl;
+    std::cout << "  CSV tag          : " << getCurrentModeTag() << std::endl;
+    std::cout << "  Telemetri console: " << (serialHandler.isTelemetryConsoleEnabled() ? "ON" : "OFF") << std::endl;
     std::cout << "  (Ketik 'admittance status' untuk detail K/B/Z dari Arduino)" << std::endl;
     std::cout << "-------------------------\n" << std::endl;
 }
 
 void CLIHandler::printHelp() {
     std::cout << "\n=== CLI Experiment Controller ===" << std::endl;
-    std::cout << "Experiment Control:" << std::endl;
+    std::cout << "Display:" << std::endl;
+    std::cout << "  telem off/on        Toggle telemetri console (CSV tetap jalan)" << std::endl;
+    std::cout << std::endl;
+    std::cout << "Rehab Control:" << std::endl;
+    std::cout << "  start               Mulai siklus rehabilitasi" << std::endl;
+    std::cout << "  calibrate           Kalibrasi & reset posisi" << std::endl;
+    std::cout << "  trajectory 1/2/3    Pilih trajektori (alias: traj 1/2/3)" << std::endl;
+    std::cout << "  cycle <n>           Set jumlah cycle target" << std::endl;
+    std::cout << "  forward / fwd       Manual maju" << std::endl;
+    std::cout << "  reverse / rev       Manual mundur" << std::endl;
+    std::cout << std::endl;
+    std::cout << "Experiment:" << std::endl;
     std::cout << "  admittance on       Aktifkan admittance control" << std::endl;
     std::cout << "  admittance off      Matikan admittance control" << std::endl;
     std::cout << "  admittance reset    Reset K, B, activation ke default" << std::endl;
@@ -217,8 +276,8 @@ void CLIHandler::printHelp() {
     std::cout << std::endl;
     std::cout << "System:" << std::endl;
     std::cout << "  status / mode       Print current experiment mode" << std::endl;
+    std::cout << "  stop                Stop motors" << std::endl;
     std::cout << "  reset               System reset (send X to Arduino)" << std::endl;
-    std::cout << "  stop                Stop motors (send 0 to Arduino)" << std::endl;
     std::cout << "  emergency / estop   Emergency stop" << std::endl;
     std::cout << "  help                Show this help" << std::endl;
     std::cout << "  quit / exit         Graceful shutdown" << std::endl;
